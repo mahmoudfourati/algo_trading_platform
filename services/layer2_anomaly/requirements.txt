@@ -1,0 +1,8 @@
+kafka-python==2.0.2
+pydantic==2.9.2
+prometheus-client==0.21.0
+numpy>=1.26
+hmmlearn>=0.3
+scikit-learn>=1.4
+river>=0.21
+joblib>=1.3

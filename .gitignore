@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime data/artifacts
+artifacts/
+data/
+logs/
+
+# IDE
+.vscode/
+
+# Secrets
+.env
+.env.*
+
+# OS
+Thumbs.db
+Desktop.ini

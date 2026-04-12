@@ -1,0 +1,158 @@
+name: algo-trading
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+    ports:
+      - "22181:2181"
+    networks:
+      - trading-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: "1"
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      # Two listeners:
+      # - PLAINTEXT for intra-compose (containers use kafka:9092)
+      # - PLAINTEXT_HOST for host access (host uses localhost:29092)
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: "1"
+    ports:
+      - "29092:29092"
+    networks:
+      - trading-net
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  metrics-service:
+    build:
+      context: ./services/metrics
+    environment:
+      METRICS_SERVICE_PORT: "9100"
+    ports:
+      - "9100:9100"
+    networks:
+      - trading-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  layer1-ingestion:
+    build:
+      context: .
+      dockerfile: ./services/layer1_ingestion/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
+      PUBLISH_RAW_TO_KAFKA: "1"
+      METRICS_PORT: "9101"
+      # Defaults are fine, but keep explicit for clarity.
+      EXCHANGES: "binance,coinbase,kraken"
+      SYMBOLS: "BTC-USDT,ETH-USDT"
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    ports:
+      - "9101:9101"
+    networks:
+      - trading-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  layer1-validated:
+    build:
+      context: .
+      dockerfile: ./services/layer1_validated/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
+      METRICS_PORT: "9102"
+      EXCHANGES: "binance,coinbase,kraken"
+      KAFKA_RAW_TOPIC: "market.ticks.raw"
+      KAFKA_VALIDATED_TOPIC: "market.ticks.validated"
+      KAFKA_AUTO_OFFSET_RESET: "latest"
+      HASH_CHAIN_LOG_PATH: "/app/logs/layer1_hash_chain.jsonl"
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    ports:
+      - "9102:9102"
+    networks:
+      - trading-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  layer2-anomaly:
+    build:
+      context: .
+      dockerfile: ./services/layer2_anomaly/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
+      METRICS_PORT: "9103"
+      KAFKA_VALIDATED_TOPIC: "market.ticks.validated"
+      KAFKA_SCORED_TOPIC: "market.ticks.scored"
+      KAFKA_AUTO_OFFSET_RESET: "latest"
+      HMM_MODEL_PATH: "/app/artifacts/hmm/model.pkl"
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+      - ./artifacts:/app/artifacts
+    ports:
+      - "9103:9103"
+    networks:
+      - trading-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - trading-net
+    depends_on:
+      - metrics-service
+      - layer1-ingestion
+      - layer1-validated
+      - layer2-anomaly
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - trading-net
+    depends_on:
+      - prometheus
+
+networks:
+  trading-net:
+    driver: bridge

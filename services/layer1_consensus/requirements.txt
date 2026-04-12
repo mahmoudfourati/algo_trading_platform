@@ -1,0 +1,2 @@
+pydantic==2.9.2
+kafka-python==2.0.2

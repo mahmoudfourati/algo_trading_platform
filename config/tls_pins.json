@@ -1,0 +1,17 @@
+{
+  "binance": {
+    "host": "stream.binance.com",
+    "port": 9443,
+    "sha256_fingerprint": "b4fc8d3dabbe3e3ba78650b8923b52627cfe48a91f28f245abccdef7680c44bb"
+  },
+  "coinbase": {
+    "host": "ws-feed.exchange.coinbase.com",
+    "port": 443,
+    "sha256_fingerprint": "ed69989f083da9de050abf23a04d71a739b5146f22d6182333dd517005bdbad0"
+  },
+  "kraken": {
+    "host": "ws.kraken.com",
+    "port": 443,
+    "sha256_fingerprint": "27850526f2c56fe0a199a247ffba0471192081d6a4b38c8933423e7f0b469256"
+  }
+}
