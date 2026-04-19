@@ -27,6 +27,27 @@ Services:
 - Layer 1 validated `/metrics`: `http://localhost:9102/metrics`
 - Layer 2 anomaly `/metrics`: `http://localhost:9103/metrics`
 
+### Grafana dashboards (auto-provisioned)
+
+Grafana now auto-loads a dashboard folder and pipeline dashboard from provisioning files.
+
+- Folder: `Algo Trading`
+- Dashboard: `Algo Trading Pipeline Overview`
+
+Open Grafana and navigate:
+
+1. `Dashboards`
+2. `Algo Trading`
+3. `Algo Trading Pipeline Overview`
+
+The dashboard visualizes:
+
+- Layer 1 ingestion rates by exchange
+- Raw -> validated -> scored throughput
+- Trust score and anomaly components (IF/HST)
+- Pipeline latency and Layer 2 input lag
+- Kafka publisher buffer depth and publish errors
+
 ### Stop / reset
 
 ```powershell
@@ -65,6 +86,34 @@ Open Prometheus targets:
 You should see `metrics-service` as **UP**.
 
 You should also see `layer1-ingestion` and `layer1-validated` as **UP**.
+
+You should also see `layer2-anomaly` as **UP**.
+
+### Flow metrics added
+
+Additional metrics are exported to improve observability of message flow and backpressure:
+
+- Layer 1 raw publisher:
+	- `layer1_ingestion_kafka_enqueued_total`
+	- `layer1_ingestion_kafka_sent_total`
+	- `layer1_ingestion_kafka_dropped_total`
+	- `layer1_ingestion_kafka_publish_errors_total`
+	- `layer1_ingestion_kafka_buffer_depth`
+- Layer 1 validated:
+	- `layer1_validated_last_window_sources`
+	- `layer1_validated_last_window_used_sources`
+	- `layer1_validated_last_window_latency_ms`
+- Layer 2 anomaly:
+	- `layer2_last_if_score`
+	- `layer2_last_hst_score`
+	- `layer2_last_input_trust_score`
+	- `layer2_last_input_lag_ms`
+- Shared JSON Kafka publisher (used by validated/scored publishers):
+	- `kafka_json_publisher_enqueued_total`
+	- `kafka_json_publisher_sent_total`
+	- `kafka_json_publisher_dropped_total`
+	- `kafka_json_publisher_errors_total`
+	- `kafka_json_publisher_queue_depth`
 
 ## Phase 2 (in progress): Layer 1 adapters
 
