@@ -1,3 +1,4 @@
+<!-- Purpose: Source blueprint document that this repository implements. -->
   
 **SECURE ALGORITHMIC TRADING PLATFORM**
 

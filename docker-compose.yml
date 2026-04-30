@@ -1,3 +1,4 @@
+# Purpose: Local Docker Compose stack for Kafka + services + monitoring.
 name: algo-trading
 
 services:

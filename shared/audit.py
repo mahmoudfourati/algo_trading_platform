@@ -1,3 +1,8 @@
+"""Audit event helpers.
+
+Emits structured audit events to stdout and optionally appends them to a log file.
+"""
+
 from __future__ import annotations
 
 import json

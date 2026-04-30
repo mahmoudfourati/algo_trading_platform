@@ -1,3 +1,4 @@
+# Purpose: Image for Layer 2 anomaly scoring (ValidatedTick -> ScoredTick).
 FROM python:3.11-slim
 
 WORKDIR /app

@@ -1,3 +1,8 @@
+"""Layer 2 anomaly scoring engine.
+
+Builds rolling features, runs anomaly models, and drives the decision-gate state machine.
+"""
+
 from __future__ import annotations
 
 import math

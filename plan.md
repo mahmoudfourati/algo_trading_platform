@@ -1,3 +1,4 @@
+<!-- Purpose: Blueprint-aligned implementation plan and acceptance criteria. -->
 ## Plan: Secure Algo Trading Platform (Blueprint-Compliant)
 
 Build the platform strictly in Claude’s phase order, using the blueprint’s layer contracts, Kafka topic boundaries, and required validation methodology as acceptance criteria. The core principle is depth-before-breadth: each phase must be runnable and testable end-to-end before starting the next.

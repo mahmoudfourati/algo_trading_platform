@@ -1,3 +1,8 @@
+"""Validated-tick hash chain logger.
+
+Appends an immutable hash chain entry per validated window for auditability.
+"""
+
 from __future__ import annotations
 
 import hashlib

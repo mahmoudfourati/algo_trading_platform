@@ -1,3 +1,8 @@
+"""Base WebSocket adapter primitives.
+
+Provides reconnection/backoff/heartbeat scaffolding and TLS pin verification helpers.
+"""
+
 from __future__ import annotations
 
 import asyncio

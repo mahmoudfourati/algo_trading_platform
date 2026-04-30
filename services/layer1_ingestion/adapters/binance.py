@@ -1,3 +1,8 @@
+"""Binance WebSocket adapter.
+
+Connects to Binance streams and normalizes ticker messages into NormalizedTick.
+"""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,8 @@
+"""Shared Pydantic schemas.
+
+Defines canonical message contracts exchanged between services (Kafka payloads).
+"""
+
 from __future__ import annotations
 
 from typing import Literal, Optional
@@ -5,7 +10,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-ExchangeId = Literal["binance", "coinbase", "kraken"]
+ExchangeId = Literal["binance", "coinbase", "kraken", "okx", "bybit"]
 
 
 class NormalizedTick(BaseModel):
@@ -42,6 +47,8 @@ class ValidatedTick(BaseModel):
     trust_score: float
     sub_scores: dict[str, float]
     divergent_sources: list[ExchangeId]
+    # Optional map of overdue exchanges -> silence_ms.
+    liveness: Optional[dict[str, float]] = None
     timestamp_utc: int
     tick_hash: str
 

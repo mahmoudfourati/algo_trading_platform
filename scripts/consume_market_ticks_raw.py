@@ -1,3 +1,8 @@
+"""Debug consumer for raw ticks.
+
+Reads Kafka topic `market.ticks.raw` and prints each message as JSON.
+"""
+
 import json
 import os
 import time

@@ -1,1 +1,1 @@
-# Package marker
+"""metrics-service FastAPI application package."""

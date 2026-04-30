@@ -1,3 +1,8 @@
+"""Layer 1 validated service.
+
+Consumes raw ticks, aligns windows, runs consensus + trust scoring, and publishes ValidatedTick.
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,12 +16,14 @@ from typing import Dict, Iterable, List, Optional
 from kafka import KafkaConsumer
 from prometheus_client import Counter, Gauge
 
-from services.layer1_consensus.engine import ConsensusConfig, ConsensusEngine, TickAligner
+from services.layer1_consensus.engine import AlignedWindow, ConsensusConfig, ConsensusEngine, TickAligner
 from services.layer1_hashlog.hash_chain import HashChainLogger
-from services.layer1_trust.scoring import TrustWeights, compute_subscores, compute_trust_score, load_trust_weights
+from services.layer1_trust.scoring import TrustWeights, compute_subscores, compute_t2, compute_trust_score, load_trust_weights
 from shared.audit import emit_audit_event
 from shared.metrics_http import start_metrics_http_server
 from shared.schemas import ExchangeId, NormalizedTick, ValidatedTick
+
+from .liveness import ExchangeLivenessMonitor
 
 from .kafka_json_publisher import KafkaJsonPublisher, KafkaJsonPublisherConfig
 
@@ -57,11 +64,12 @@ def _parse_csv(value: str) -> list[str]:
 def _enabled_exchanges() -> list[ExchangeId]:
     raw = os.getenv("EXCHANGES", "binance,coinbase,kraken")
     xs = _parse_csv(raw)
-    return [x for x in xs if x in {"binance", "coinbase", "kraken"}]  # type: ignore[return-value]
+    return [x for x in xs if x in {"binance", "coinbase", "kraken", "okx", "bybit"}]  # type: ignore[return-value]
 
 
-def _median_latency_ms(ticks: Iterable[NormalizedTick]) -> float:
-    latencies = [max(0, t.received_timestamp_ms - t.exchange_timestamp_ms) for t in ticks]
+def _median_latency_ms(ticks: Iterable[NormalizedTick], *, now_ms: int) -> float:
+    # Use window/processing time vs exchange time so carry-forward staleness is penalized.
+    latencies = [max(0, int(now_ms) - int(t.exchange_timestamp_ms)) for t in ticks]
     if not latencies:
         return 0.0
     return float(statistics.median(latencies))
@@ -95,6 +103,9 @@ class Layer1ValidatedService:
     weights: TrustWeights
     hashlog: HashChainLogger
     enabled_exchanges: List[ExchangeId]
+    liveness: ExchangeLivenessMonitor
+    _last_liveness_overdue: Dict[str, float]
+    _last_liveness_check_s: float
 
     def run_forever(self) -> None:
         emit_audit_event(
@@ -119,14 +130,23 @@ class Layer1ValidatedService:
 
                 _raw_ticks_total.inc()
 
-                for symbol, by_ex in self.aligner.add(tick):
-                    self._process_window(symbol, by_ex)
+                self.liveness.record_tick(tick.exchange_id)
+                now_s = time.time()
+                if now_s - self._last_liveness_check_s >= 1.0:
+                    self._last_liveness_overdue = self.liveness.check_all()
+                    self._last_liveness_check_s = now_s
+
+                for window in self.aligner.add(tick):
+                    self._process_window(window)
         finally:
             self.hashlog.stop()
             self.publisher.stop()
             self.consumer.close()
 
-    def _process_window(self, symbol: str, by_ex: Dict[ExchangeId, NormalizedTick]) -> None:
+    def _process_window(self, window: AlignedWindow) -> None:
+        symbol = window.symbol
+        by_ex = window.by_ex
+
         _windows_total.labels(symbol=symbol).inc()
         out = self.consensus.process_aligned(symbol, by_ex)
         if out.consensus_mid is None:
@@ -134,10 +154,15 @@ class Layer1ValidatedService:
 
         usable_ticks = [t for ex, t in by_ex.items() if ex in out.used_sources]
 
-        total_sources = max(1, len(self.enabled_exchanges))
-        agreeing_sources = len(out.used_sources)
+        tolerance = abs(out.consensus_mid) * float(self.consensus.config.divergence_tolerance)
+        t2 = compute_t2(
+            ticks_with_age=window.ticks_with_age,
+            consensus_price=out.consensus_mid,
+            tolerance=tolerance,
+            active_sources=window.active_sources,
+        )
 
-        latency_ms = _median_latency_ms(usable_ticks)
+        latency_ms = _median_latency_ms(usable_ticks, now_ms=window.window_end_ms)
         spread = _median_spread(usable_ticks)
         volume_24h = _median_volume_24h(usable_ticks)
 
@@ -152,8 +177,7 @@ class Layer1ValidatedService:
 
         subscores = compute_subscores(
             tls_ok=tls_ok,
-            agreeing_sources=agreeing_sources,
-            total_sources=total_sources,
+            t2=t2,
             latency_ms=latency_ms,
             sequence_gap=sequence_gap,
             chain_ok=chain_ok,
@@ -165,7 +189,7 @@ class Layer1ValidatedService:
             symbol=symbol,
             consensus_mid=out.consensus_mid,
             trust_score=trust_score,
-            received_timestamp_ms=int(time.time() * 1000),
+            received_timestamp_ms=window.window_end_ms,
             previous_hash=previous_hash,
         )
 
@@ -177,8 +201,9 @@ class Layer1ValidatedService:
             trust_score=trust_score,
             sub_scores=subscores,
             divergent_sources=out.quarantined_sources,
-            timestamp_utc=int(time.time() * 1000),
+            timestamp_utc=window.window_end_ms,
             tick_hash=tick_hash,
+            liveness=self._last_liveness_overdue or None,
         )
 
         self.publisher.publish(validated.model_dump())
@@ -220,6 +245,14 @@ def build_service() -> Layer1ValidatedService:
     hashlog = HashChainLogger(path=log_path)
     hashlog.start()
 
+    def _audit(event_type: str, payload: Dict) -> None:
+        emit_audit_event(event_type, source="layer1_validated", payload=payload)
+
+    liveness = ExchangeLivenessMonitor(
+        sources=[str(x) for x in enabled_exchanges],
+        audit_fn=_audit,
+    )
+
     return Layer1ValidatedService(
         consumer=consumer,
         publisher=publisher,
@@ -228,6 +261,9 @@ def build_service() -> Layer1ValidatedService:
         weights=weights,
         hashlog=hashlog,
         enabled_exchanges=enabled_exchanges,
+        liveness=liveness,
+        _last_liveness_overdue={},
+        _last_liveness_check_s=0.0,
     )
 
 

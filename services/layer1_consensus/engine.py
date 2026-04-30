@@ -1,3 +1,8 @@
+"""Layer 1 tick alignment and consensus.
+
+Aligns ticks into short windows and applies divergence/quarantine rules to compute consensus.
+"""
+
 from __future__ import annotations
 
 import dataclasses
@@ -9,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from shared.audit import emit_audit_event
 from shared.schemas import ExchangeId, NormalizedTick
+
+
+LKV_STALENESS_MS = 15_000
+LIVENESS_THRESHOLD_MS = 30_000
 
 
 class ConsensusConfig(BaseModel):
@@ -200,16 +209,34 @@ class TickAligner:
         self._buf: DefaultDict[str, List[NormalizedTick]] = defaultdict(list)
         self._window_start_ms: Dict[str, int] = {}
 
-    def add(self, tick: NormalizedTick) -> List[Tuple[str, Dict[ExchangeId, NormalizedTick]]]:
+        # Per-symbol last-known-value registry (exchange -> latest tick) + last-seen timestamps.
+        self._lkv: DefaultDict[str, Dict[ExchangeId, NormalizedTick]] = defaultdict(dict)
+        self._lkv_ts: DefaultDict[str, Dict[ExchangeId, float]] = defaultdict(dict)
+
+    def add(self, tick: NormalizedTick) -> List["AlignedWindow"]:
         symbol = tick.symbol
         self._buf[symbol].append(tick)
         if symbol not in self._window_start_ms:
             self._window_start_ms[symbol] = tick.received_timestamp_ms
 
+        # Always update LKV for this symbol/source.
+        self._lkv[symbol][tick.exchange_id] = tick
+        self._lkv_ts[symbol][tick.exchange_id] = float(tick.received_timestamp_ms)
+
         return self.flush_due(now_ms=tick.received_timestamp_ms)
 
-    def flush_due(self, *, now_ms: int) -> List[Tuple[str, Dict[ExchangeId, NormalizedTick]]]:
-        ready: List[Tuple[str, Dict[ExchangeId, NormalizedTick]]] = []
+    def active_sources(self, *, symbol: str, now_ms: float) -> set[ExchangeId]:
+        """Sources for this symbol seen within LIVENESS_THRESHOLD_MS."""
+
+        return {
+            s
+            for s, ts in self._lkv_ts.get(symbol, {}).items()
+            if now_ms - float(ts) <= float(LIVENESS_THRESHOLD_MS)
+        }
+
+    def flush_due(self, *, now_ms: int) -> List["AlignedWindow"]:
+        now_f = float(now_ms)
+        ready: List[AlignedWindow] = []
 
         for symbol in list(self._buf.keys()):
             start = self._window_start_ms.get(symbol)
@@ -221,10 +248,53 @@ class TickAligner:
             ticks = self._buf.pop(symbol, [])
             self._window_start_ms.pop(symbol, None)
 
-            by_ex: Dict[ExchangeId, NormalizedTick] = {}
+            window_ticks: Dict[ExchangeId, NormalizedTick] = {}
             for t in ticks:
                 # Keep the last tick per exchange within the window.
-                by_ex[t.exchange_id] = t
-            ready.append((symbol, by_ex))
+                window_ticks[t.exchange_id] = t
+
+            # Fill missing sources from LKV, subject to staleness gating.
+            ticks_with_age: List[Tuple[NormalizedTick, float]] = []
+            merged: Dict[ExchangeId, NormalizedTick] = dict(window_ticks)
+
+            for ex, t in window_ticks.items():
+                ticks_with_age.append((t, 0.0))
+
+            all_sources = set(self._lkv.get(symbol, {}).keys())
+            for ex in all_sources:
+                if ex in window_ticks:
+                    continue
+                lkv_tick = self._lkv.get(symbol, {}).get(ex)
+                lkv_ts = float(self._lkv_ts.get(symbol, {}).get(ex, 0.0))
+                age_ms = now_f - lkv_ts
+                if lkv_tick is not None and age_ms <= float(LKV_STALENESS_MS):
+                    merged[ex] = lkv_tick
+                    ticks_with_age.append((lkv_tick, age_ms))
+
+            active = self.active_sources(symbol=symbol, now_ms=now_f)
+
+            ready.append(
+                AlignedWindow(
+                    symbol=symbol,
+                    window_end_ms=int(now_ms),
+                    by_ex=merged,
+                    ticks_with_age=ticks_with_age,
+                    active_sources=active,
+                )
+            )
 
         return ready
+
+
+@dataclasses.dataclass(frozen=True)
+class AlignedWindow:
+    """One aligned aggregation window for a symbol.
+
+    Includes LKV-filled ticks and their age (ms) for weighted trust scoring.
+    """
+
+    symbol: str
+    window_end_ms: int
+    by_ex: Dict[ExchangeId, NormalizedTick]
+    ticks_with_age: List[Tuple[NormalizedTick, float]]
+    active_sources: set[ExchangeId]

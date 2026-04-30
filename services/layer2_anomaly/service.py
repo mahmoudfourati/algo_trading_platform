@@ -1,3 +1,8 @@
+"""Layer 2 anomaly service.
+
+Consumes ValidatedTick, emits anomaly/system state, and publishes ScoredTick.
+"""
+
 from __future__ import annotations
 
 import json

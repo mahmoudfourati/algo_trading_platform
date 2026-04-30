@@ -1,3 +1,4 @@
+# Purpose: Image for Layer 1 validated (align/consensus/trust -> ValidatedTick -> Kafka).
 FROM python:3.11-slim
 
 WORKDIR /app

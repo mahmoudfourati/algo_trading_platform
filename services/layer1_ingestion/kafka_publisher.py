@@ -1,3 +1,8 @@
+"""Raw tick Kafka publisher.
+
+Publishes NormalizedTick messages with a bounded outage buffer and topic auto-create.
+"""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,8 @@
+"""Kraken WebSocket adapter.
+
+Connects to Kraken feed and normalizes ticker messages into NormalizedTick.
+"""
+
 from __future__ import annotations
 
 import json

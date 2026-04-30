@@ -1,3 +1,4 @@
+<!-- Purpose: Project overview and how to run/verify the stack locally. -->
 # Secure Algorithmic Trading Platform (Blueprint Implementation)
 
 This repo implements the system described in `trading_blueprint_final.docx.md`.

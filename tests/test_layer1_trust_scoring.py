@@ -1,3 +1,8 @@
+"""Tests for Layer 1 trust scoring.
+
+Validates subscores (T1..T5) and weighted aggregation behavior.
+"""
+
 from __future__ import annotations
 
 import math
@@ -6,20 +11,57 @@ import pytest
 
 from services.layer1_trust.scoring import (
     HALF_LIFE_MS,
+    T2_HALF_LIFE_MS,
     TrustWeights,
+    compute_t2,
     compute_subscores,
     compute_trust_score,
-    t2_consensus_agreement,
     t3_latency_freshness,
     t4_sequence_integrity,
 )
 
+from shared.schemas import NormalizedTick
 
-def test_t2_consensus_agreement() -> None:
-    assert t2_consensus_agreement(agreeing_sources=3, total_sources=3) == 1.0
-    assert t2_consensus_agreement(agreeing_sources=2, total_sources=3) == 2.0 / 3.0
-    assert t2_consensus_agreement(agreeing_sources=1, total_sources=3) == 1.0 / 3.0
-    assert t2_consensus_agreement(agreeing_sources=0, total_sources=3) == 0.0
+
+def _tick(*, exchange_id: str, mid: float) -> NormalizedTick:
+    return NormalizedTick(
+        exchange_id=exchange_id,  # type: ignore[arg-type]
+        symbol="BTC-USDT",
+        bid=mid - 0.01,
+        ask=mid + 0.01,
+        last_price=mid,
+        volume_24h=1.0,
+        exchange_timestamp_ms=0,
+        received_timestamp_ms=0,
+        sequence_id=None,
+    )
+
+
+def test_compute_t2_all_agree_is_one() -> None:
+    ticks_with_age = [(_tick(exchange_id="binance", mid=100.0), 0.0), (_tick(exchange_id="coinbase", mid=100.0), 0.0)]
+    t2 = compute_t2(
+        ticks_with_age=ticks_with_age,
+        consensus_price=100.0,
+        tolerance=0.5,
+        active_sources={"binance", "coinbase"},  # type: ignore[arg-type]
+    )
+    assert t2 == pytest.approx(1.0)
+
+
+def test_compute_t2_half_life_weighting() -> None:
+    # One agreeing source now (w=1.0) and one disagreeing source at half-life ago (w=0.5).
+    ticks_with_age = [
+        (_tick(exchange_id="binance", mid=100.0), 0.0),
+        (_tick(exchange_id="coinbase", mid=110.0), T2_HALF_LIFE_MS),
+    ]
+    t2 = compute_t2(
+        ticks_with_age=ticks_with_age,
+        consensus_price=100.0,
+        tolerance=0.1,
+        active_sources={"binance", "coinbase"},  # type: ignore[arg-type]
+    )
+    # Expected = (1.0*1 + 0.5*0) / (1.0 + 0.5) = 2/3
+    assert t2 == pytest.approx(2.0 / 3.0)
 
 
 def test_t3_latency_freshness_half_life() -> None:
@@ -48,8 +90,7 @@ def test_combined_trust_score_matches_hand_computed_example() -> None:
 
     subscores = compute_subscores(
         tls_ok=True,           # T1=1
-        agreeing_sources=2,    # T2=2/3
-        total_sources=3,
+        t2=2.0 / 3.0,
         latency_ms=25.0,       # T3=0.5
         sequence_gap=2,        # T4=0.5
         chain_ok=False,        # T5=0

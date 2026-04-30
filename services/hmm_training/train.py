@@ -1,3 +1,8 @@
+"""Offline HMM training entrypoint.
+
+Downloads historical data, builds features, trains a GaussianHMM, and writes artifacts.
+"""
+
 from __future__ import annotations
 
 import argparse

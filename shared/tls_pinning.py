@@ -1,3 +1,8 @@
+"""TLS pinning utilities.
+
+Loads expected leaf-certificate SHA-256 fingerprints and verifies remote servers.
+"""
+
 from __future__ import annotations
 
 import hashlib

@@ -1,3 +1,4 @@
+<!-- Purpose: Running progress log compared against plan.md and the blueprint. -->
 # Progress Report
 
 This file is the running implementation log, written so it can be compared directly against the execution plan in `plan.md` (Copilot memory artifact) and the blueprint in `trading_blueprint_final.docx.md`.

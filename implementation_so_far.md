@@ -1,6 +1,7 @@
+<!-- Purpose: What’s implemented so far and how to run/verify it. -->
 # Secure Algorithmic Trading Platform — Implementation So Far (Phases 1–4)
 
-_Date: 2026-04-11_
+_Date: 2026-04-28_
 
 This document is an article-style explanation of what has been implemented in this repository so far, following the phase order described in `trading_blueprint_final.docx.md`.
 
@@ -12,7 +13,7 @@ The platform’s core idea is **trust-first market data**: before any strategy l
 
 What we have today is a running, observable end-to-end pipeline:
 
-1. **Layer 1 ingestion** connects to live exchange WebSockets (Binance/Coinbase/Kraken), normalizes market ticks, and (optionally) publishes them to Kafka.
+1. **Layer 1 ingestion** connects to live exchange WebSockets (Binance/Coinbase/Kraken/OKX/Bybit), normalizes market ticks, and (optionally) publishes them to Kafka.
 2. **Layer 1 validation** consumes raw ticks, aligns them into a 50ms window per symbol, performs consensus + divergence quarantine, computes a blueprint-style trust score (T1–T5), appends a cryptographic hash-chain entry, and publishes a `ValidatedTick`.
 3. **Offline HMM training** downloads Binance Vision historical klines, derives 30-minute realized volatility, trains a 3-state `GaussianHMM`, and writes the trained model + metadata artifacts.
 4. **Layer 2 anomaly detection** consumes `ValidatedTick`, builds a rolling feature window, infers regime via the HMM, scores anomalies via Isolation Forest + Half-Space Trees, applies the MAD guard, runs the decision-gate hysteresis, and publishes `ScoredTick` to Kafka.
@@ -44,7 +45,7 @@ Kafka listeners are configured so:
 
 ```mermaid
 flowchart LR
-  A[Exchange WS: Binance/Coinbase/Kraken] --> B[layer1-ingestion]
+  A[Exchange WS: Binance/Coinbase/Kraken/OKX/Bybit] --> B[layer1-ingestion]
   B -->|NormalizedTick JSON| K1[(Kafka: market.ticks.raw)]
   K1 --> C[layer1-validated]
   C -->|ValidatedTick JSON| K2[(Kafka: market.ticks.validated)]
@@ -112,6 +113,14 @@ Layer 1 is the “data integrity engine”. It is responsible for answering:
 
 Each exchange adapter is a WebSocket client that streams live updates and emits a normalized `NormalizedTick`.
 
+Implemented adapters:
+
+- Binance
+- Coinbase
+- Kraken
+- OKX
+- Bybit (uses Bybit v5 `public/linear` ticker stream so bid/ask are available)
+
 Common adapter behavior is in `services/layer1_ingestion/adapters/base.py`:
 
 - **TLS certificate pinning** is checked before connecting.
@@ -156,6 +165,12 @@ Layer 1 ingestion can run in “print-only” mode or publish to Kafka.
 - Entry point: `services/layer1_ingestion/run_console.py`
 - Kafka publisher: `services/layer1_ingestion/kafka_publisher.py`
 
+Operational note: when running from repo root, prefer module execution so imports resolve consistently (and `--duration` shutdown is reliable):
+
+```powershell
+.\.venv\Scripts\python -m services.layer1_ingestion.run_console --symbols BTC-USDT --sources binance,coinbase,kraken,okx,bybit --no-kafka --duration 60
+```
+
 A long-running stability runner exists for live feed soak testing:
 
 - `services/layer1_ingestion/soak_runner.py`
@@ -190,10 +205,17 @@ Unit tests:
 The trust score is a weighted sum of five sub-scores:
 
 - **T1** TLS validity (binary)
-- **T2** consensus agreement (agreeing/total)
+- **T2** consensus agreement (freshness-weighted, time-decayed; uses a half-life of 7.5s)
 - **T3** freshness = exp(-λ·latency_ms), with 25ms half-life
 - **T4** sequence integrity penalty (currently no penalty when sequence IDs are not available)
 - **T5** hash-chain continuity (binary)
+
+Layer 1 also implements a “combined trust fix” around agreement/availability:
+
+- **Last-known-value (LKV) fill** in the aligner so short per-exchange gaps don’t collapse the active denominator.
+- **Staleness gating** so LKV is only used while it is fresh enough.
+- **Active-source denominator** so agreement is computed against the set of sources that are actually active in the window.
+- **Separate liveness monitoring** so “an exchange is silent” is tracked independently from the trust score.
 
 Weights are loaded from `config/trust_weights.json` via `load_trust_weights()`.
 
@@ -227,6 +249,8 @@ This service consumes raw ticks, builds aligned windows, runs consensus + trust 
 - `spread` (aggregated relative spread `(ask-bid)/mid`)
 
 These are optional for backward compatibility with previously emitted messages.
+
+Additionally, Layer 1 validation wires an `ExchangeLivenessMonitor` which emits `exchange_silent` / `exchange_recovered` audit events and can attach a per-exchange overdue map to each validated output.
 
 ---
 
@@ -394,10 +418,44 @@ Grafana is configured to point at Prometheus via Docker DNS (`http://prometheus:
 The repo includes focused tests that validate the most failure-prone logic:
 
 - Adapter message parsing: `tests/test_layer1_adapters.py`
+- Bybit parsing + snapshot/delta merge: `tests/test_bybit_adapter_parsing.py`
 - Divergence quarantine and escalation: `tests/test_layer1_consensus.py`
 - Trust score math: `tests/test_layer1_trust_scoring.py`
+- Weighted T2 + LKV/staleness behavior: `tests/test_layer1_t2_lkv_fix.py`
 - Hash chain integrity: `tests/test_layer1_hash_chain.py`
 - TLS pinning refusal on mismatch: `tests/test_tls_pinning.py`
+
+To run all tests:
+
+```powershell
+.\.venv\Scripts\python -m pytest -q
+```
+
+### Runtime verification (host, no Kafka)
+
+Console ingestion (prints live normalized ticks):
+
+```powershell
+.\.venv\Scripts\python -m services.layer1_ingestion.run_console --symbols BTC-USDT --sources binance,coinbase,kraken,okx,bybit --no-kafka --duration 60
+```
+
+Expected:
+
+- `adapter_connect` audit events for configured sources.
+- Tick lines containing `exchange_id` for all sources.
+
+Layer 1 end-to-end soak + report (runs adapters locally, runs consensus/trust/hash-chain, writes a Markdown report):
+
+Note: the script starts a fresh hash-chain log per run so repeated runs don’t fail verification due to previous-log reuse.
+
+```powershell
+.\.venv\Scripts\python scripts/layer1_e2e_test.py --symbols BTC-USDT --duration 120 --output artifacts/reports/
+.\.venv\Scripts\python scripts/layer1_e2e_test.py --symbols BTC-USDT --duration 1200 --output artifacts/reports/
+```
+
+Most recent 20-minute report:
+
+- `artifacts/reports/layer1_e2e_20260428_160028.md`
 
 ### End-to-end checks (Kafka topics)
 

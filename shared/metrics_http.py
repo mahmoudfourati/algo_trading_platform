@@ -1,3 +1,8 @@
+"""Minimal Prometheus metrics HTTP server.
+
+Provides a lightweight way for services to expose `/metrics`.
+"""
+
 from __future__ import annotations
 
 import threading

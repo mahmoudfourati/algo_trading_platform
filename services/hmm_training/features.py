@@ -1,3 +1,8 @@
+"""Offline training feature engineering.
+
+Derives feature series (e.g., realized volatility) from historical price data.
+"""
+
 from __future__ import annotations
 
 import math
