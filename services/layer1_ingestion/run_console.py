@@ -48,7 +48,7 @@ def _symbols() -> list[str]:
 
 
 def _exchanges() -> list[str]:
-    return _parse_csv(os.getenv("EXCHANGES", "binance,coinbase,kraken"))
+    return _parse_csv(os.getenv("EXCHANGES", "binance,bybit,coinbase,kraken,okx"))
 
 
 def _parse_args() -> argparse.Namespace:

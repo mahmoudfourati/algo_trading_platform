@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from shared.schemas import ExchangeId
+
 
 GENESIS_HASH = "0" * 64
 
@@ -25,16 +27,24 @@ def _canonical_json_bytes(obj: Dict[str, Any]) -> bytes:
 def compute_tick_hash(
     *,
     symbol: str,
+    primary_exchange: ExchangeId,
+    primary_mid_price: float,
     consensus_mid: float,
+    used_sources: list[ExchangeId],
+    divergent_sources: list[ExchangeId],
     trust_score: float,
     received_timestamp_ms: int,
     previous_hash: str,
 ) -> str:
     payload = {
         "consensus_mid": float(consensus_mid),
+        "divergent_sources": [str(x) for x in divergent_sources],
+        "primary_exchange": str(primary_exchange),
+        "primary_mid_price": float(primary_mid_price),
         "previous_hash": str(previous_hash),
         "received_timestamp_ms": int(received_timestamp_ms),
         "symbol": str(symbol),
+        "used_sources": [str(x) for x in used_sources],
         "trust_score": float(trust_score),
     }
     digest = hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
@@ -44,7 +54,11 @@ def compute_tick_hash(
 @dataclass(frozen=True)
 class HashChainEntry:
     symbol: str
+    primary_exchange: ExchangeId
+    primary_mid_price: float
     consensus_mid: float
+    used_sources: list[ExchangeId]
+    divergent_sources: list[ExchangeId]
     trust_score: float
     received_timestamp_ms: int
     previous_hash: str
@@ -52,11 +66,15 @@ class HashChainEntry:
 
     def to_log_record(self) -> Dict[str, Any]:
         return {
-            "symbol": self.symbol,
             "consensus_mid": self.consensus_mid,
-            "trust_score": self.trust_score,
-            "received_timestamp_ms": self.received_timestamp_ms,
+            "divergent_sources": [str(x) for x in self.divergent_sources],
+            "primary_exchange": self.primary_exchange,
+            "primary_mid_price": self.primary_mid_price,
             "previous_hash": self.previous_hash,
+            "received_timestamp_ms": self.received_timestamp_ms,
+            "symbol": self.symbol,
+            "used_sources": [str(x) for x in self.used_sources],
+            "trust_score": self.trust_score,
             "tick_hash": self.tick_hash,
         }
 
@@ -110,6 +128,10 @@ class HashChainLogger:
         consensus_mid: float,
         trust_score: float,
         received_timestamp_ms: int,
+        primary_exchange: Optional[ExchangeId] = None,
+        primary_mid_price: Optional[float] = None,
+        used_sources: Optional[list[ExchangeId]] = None,
+        divergent_sources: Optional[list[ExchangeId]] = None,
         previous_hash: Optional[str] = None,
     ) -> Tuple[str, bool]:
         """Append an entry.
@@ -118,18 +140,36 @@ class HashChainLogger:
         """
 
         prev = previous_hash if previous_hash is not None else self._tip
+
+        # Backwards-compatible defaults: if caller omitted primary_exchange/primary_mid/used/divergent
+        if primary_exchange is None:
+            primary_exchange = "binance"
+        if primary_mid_price is None:
+            primary_mid_price = float(consensus_mid)
+        if used_sources is None:
+            used_sources = []
+        if divergent_sources is None:
+            divergent_sources = []
         chain_ok = prev == self._tip
 
         tick_hash = compute_tick_hash(
             symbol=symbol,
+            primary_exchange=primary_exchange,
+            primary_mid_price=primary_mid_price,
             consensus_mid=consensus_mid,
+            used_sources=used_sources,
+            divergent_sources=divergent_sources,
             trust_score=trust_score,
             received_timestamp_ms=received_timestamp_ms,
             previous_hash=prev,
         )
         entry = HashChainEntry(
             symbol=symbol,
+            primary_exchange=primary_exchange,
+            primary_mid_price=primary_mid_price,
             consensus_mid=consensus_mid,
+            used_sources=used_sources,
+            divergent_sources=divergent_sources,
             trust_score=trust_score,
             received_timestamp_ms=received_timestamp_ms,
             previous_hash=prev,
@@ -184,7 +224,18 @@ def verify_hash_chain(path: str | Path) -> Tuple[bool, str]:
             except json.JSONDecodeError as e:
                 return False, f"line {idx}: invalid json: {e}"
 
-            required = {"symbol", "consensus_mid", "trust_score", "received_timestamp_ms", "previous_hash", "tick_hash"}
+            required = {
+                "symbol",
+                "primary_exchange",
+                "primary_mid_price",
+                "consensus_mid",
+                "used_sources",
+                "divergent_sources",
+                "trust_score",
+                "received_timestamp_ms",
+                "previous_hash",
+                "tick_hash",
+            }
             if not required.issubset(rec.keys()):
                 return False, f"line {idx}: missing required fields"
 
@@ -193,7 +244,11 @@ def verify_hash_chain(path: str | Path) -> Tuple[bool, str]:
 
             recomputed = compute_tick_hash(
                 symbol=rec["symbol"],
+                primary_exchange=rec["primary_exchange"],
+                primary_mid_price=rec["primary_mid_price"],
                 consensus_mid=rec["consensus_mid"],
+                used_sources=rec["used_sources"],
+                divergent_sources=rec["divergent_sources"],
                 trust_score=rec["trust_score"],
                 received_timestamp_ms=rec["received_timestamp_ms"],
                 previous_hash=rec["previous_hash"],

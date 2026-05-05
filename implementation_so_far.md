@@ -1,523 +1,626 @@
-<!-- Purpose: What’s implemented so far and how to run/verify it. -->
-# Secure Algorithmic Trading Platform — Implementation So Far (Phases 1–4)
+<!-- Purpose: Single source of truth for what is implemented, how it fits together, and what still remains. -->
+# Secure Algorithmic Trading Platform — Implementation Ledger
 
-_Date: 2026-04-28_
+_Last updated: 2026-05-03_
 
-This document is an article-style explanation of what has been implemented in this repository so far, following the phase order described in `trading_blueprint_final.docx.md`.
+This file is the authoritative implementation narrative for the repository. It is intentionally detailed and tracks the actual codebase state from Phase 0 onward, including what is implemented, what is validated, what is intentionally simplified, and what remains incomplete.
 
-The platform’s core idea is **trust-first market data**: before any strategy logic runs, ticks are collected from multiple exchanges, aligned in time, checked for divergence, scored for integrity/latency, and chained into an immutable hash log. Only then do we attach an anomaly score and a global “system state” label that downstream trading components can treat as a safety contract.
+The project follows a strict layered pipeline: raw market data is normalized, aligned, consensus-checked, trust-scored, chained into a hash log, scored for anomaly/regime state, converted into strategy signals, risk-checked, and then eventually executed. The blueprint is phase-ordered, so this document follows that order and records the real checkpoint state rather than an aspirational one.
 
----
+## Current checkpoint
 
-## Executive Summary
+What is fully implemented and validated today:
 
-What we have today is a running, observable end-to-end pipeline:
+- Phase 0 scaffolding and repository structure.
+- Phase 1 foundation stack: Kafka, ZooKeeper, Prometheus, Grafana, smoke tests.
+- Phase 2 Layer 1 ingestion, TLS pinning, consensus, trust scoring, hash chaining, and validated-topic wiring.
+- Phase 3 offline HMM training with joblib artifacts.
+- Phase 4 Layer 2 anomaly scoring, regime inference, decision gate, and live Kafka wiring.
+- Phase 5 backtesting scaffold plus deterministic replay, scenario injection, metrics, reporting, walk-forward execution, and permutation testing utilities.
+- Phase 6 Layer 3 candle aggregation, indicators, OFI, dual-timeframe signal logic, sizing, service wiring, and tuning helpers.
+- Phase 7 Layer 4 risk management with pre-execution checks, ATR stops/targets, circuit breaking, and backtest integration.
 
-1. **Layer 1 ingestion** connects to live exchange WebSockets (Binance/Coinbase/Kraken/OKX/Bybit), normalizes market ticks, and (optionally) publishes them to Kafka.
-2. **Layer 1 validation** consumes raw ticks, aligns them into a 50ms window per symbol, performs consensus + divergence quarantine, computes a blueprint-style trust score (T1–T5), appends a cryptographic hash-chain entry, and publishes a `ValidatedTick`.
-3. **Offline HMM training** downloads Binance Vision historical klines, derives 30-minute realized volatility, trains a 3-state `GaussianHMM`, and writes the trained model + metadata artifacts.
-4. **Layer 2 anomaly detection** consumes `ValidatedTick`, builds a rolling feature window, infers regime via the HMM, scores anomalies via Isolation Forest + Half-Space Trees, applies the MAD guard, runs the decision-gate hysteresis, and publishes `ScoredTick` to Kafka.
-5. **Observability** is first-class: Prometheus scrapes every service’s `/metrics`, and Grafana is pre-provisioned with a Prometheus datasource.
+Implementation details worth keeping visible:
 
-The next major milestone (not yet implemented) is **Phase 5 / Layer 3**, where we convert the scored tick stream into candles and compute indicators/signals.
+- Layer 1 now has five exchange adapters, but the primary-exchange path is still treated as the canonical source whenever a single exchange reference is needed downstream.
+- Layer 2 is intentionally aligned to the current 2-state HMM artifact, not the older 3-state wording that still appears in parts of the blueprint.
+- The backtest harness is deterministic and reproducible, but it still uses synthetic multi-source assumptions when replaying historical data.
+- Layer 3 produces signals and sizing decisions, but the replay engine still does not consume live-style Layer 3 output end-to-end in the same way the final execution layer eventually will.
+- Layer 4 is live in backtests and unit tests, but production-grade execution, durable risk/audit persistence, and order routing are still future work.
 
----
+What is not yet implemented:
 
-## High-level Architecture
+- Phase 8 execution engine.
+- Phase 9 audit log persistence layer.
+- Phase 10 blueprint-grade statistical validation closure.
+- Phase 11 web interface.
+- Phase 12 full integration/demo polish.
 
-### Runtime topology (Docker Compose)
+This document also captures known mismatches between the plan and the current code so they stay visible instead of being buried in comments.
 
-The Compose stack is defined in `docker-compose.yml` and includes:
+## Repo map
 
-- ZooKeeper + Kafka (dual listeners: one for containers, one for the host)
-- `metrics-service` (FastAPI example service exporting `/metrics`)
-- `layer1-ingestion` (live adapters → normalized ticks → Kafka raw topic)
-- `layer1-validated` (raw topic → validation/trust/hash-chain → validated topic)
-- `layer2-anomaly` (validated topic → anomaly/regime/state → scored topic)
-- Prometheus + Grafana
+The current implementation is spread across these main surfaces:
 
-Kafka listeners are configured so:
+- `shared/`
+  - `schemas.py`: Pydantic Kafka contracts (`RawTick`, `NormalizedTick`, `ValidatedTick`, `ScoredTick`, `ApprovedOrder`).
+  - `audit.py`: structured audit-event emission helper.
+  - `tls_pinning.py`: leaf-certificate fingerprint verification.
+  - `metrics_http.py`: lightweight `/metrics` server.
+- `config/`
+  - `tls_pins.json`: exchange pin allowlist.
+  - `trust_weights.json`: Layer 1 trust weights.
+- `services/layer1_ingestion/`
+  - exchange adapters, reconnect/backoff logic, Kafka publisher, soak runner.
+- `services/layer1_consensus/`
+  - window alignment and consensus/quarantine logic.
+- `services/layer1_trust/`
+  - T1–T5 trust math and weighted aggregation.
+- `services/layer1_hashlog/`
+  - append-only hash chain for validated windows.
+- `services/layer1_validated/`
+  - raw-topic consumer, primary-exchange routing, trust/hash output, validated-topic publisher, exchange liveness monitor.
+- `services/hmm_training/`
+  - historical download, realized-volatility features, HMM artifact training.
+- `services/layer2_anomaly/`
+  - rolling features, HMM regime inference, IF/HST fusion, MAD guard, decision gate, scored-topic publisher.
+- `services/layer3_strategy/`
+  - candle aggregation, indicator suite, OFI, signal logic, sizing, service wiring, bootstrap helpers, tuning helpers.
+- `services/layer4_risk/`
+  - pre-execution checks, ATR stop/target computation, circuit breaker, approved-order creation.
+- `services/backtesting/`
+  - deterministic replay harness, scenario injection, metrics, reports, walk-forward, permutation test, SQLite results.
+- `services/metrics/`
+  - sample FastAPI metrics service.
+- `scripts/` and `artifacts/scripts/`
+  - smoke tests, consumers, report helpers, tuning runners, validation runners, data fetchers.
+- `tests/`
+  - focused unit and integration tests for all implemented layers.
 
-- Containers use `kafka:9092`
-- Host tools use `localhost:29092`
+## Architecture summary
 
-### Dataflow and Kafka topics
+The pipeline is Kafka-first and strictly layered.
 
-```mermaid
-flowchart LR
-  A[Exchange WS: Binance/Coinbase/Kraken/OKX/Bybit] --> B[layer1-ingestion]
-  B -->|NormalizedTick JSON| K1[(Kafka: market.ticks.raw)]
-  K1 --> C[layer1-validated]
-  C -->|ValidatedTick JSON| K2[(Kafka: market.ticks.validated)]
-  K2 --> D[layer2-anomaly]
-  D -->|ScoredTick JSON| K3[(Kafka: market.ticks.scored)]
+1. Live exchange adapters produce normalized raw ticks.
+2. Layer 1 aligns them, detects divergence, computes trust, and emits validated ticks.
+3. Layer 2 computes anomaly/regime/state and emits scored ticks.
+4. Layer 3 aggregates candles, computes indicators, evaluates signals, and sizes positions.
+5. Layer 4 evaluates pre-execution risk, assigns stops/targets, and approves or rejects orders.
+6. Backtesting replays historical ticks through the live Layer 1 and Layer 2 code paths and records metrics and reports.
 
-  D --> M3[/Prometheus scrape: :9103/metrics/]
-  C --> M2[/Prometheus scrape: :9102/metrics/]
-  B --> M1[/Prometheus scrape: :9101/metrics/]
-  E[metrics-service] --> M0[/Prometheus scrape: :9100/metrics/]
+Design notes:
 
-  P[Prometheus] --> G[Grafana]
-```
+- The codebase prefers small, pure helpers for math-heavy logic and keeps service classes focused on wiring, IO, and state transitions.
+- Most cross-layer contracts are Pydantic models in `shared/schemas.py`, so schema changes are visible quickly in both tests and runtime code.
+- The system keeps canonical JSON hashing and stable serialization rules because the trust/hash chain depends on byte-for-byte reproducibility.
+- Layer 2 and Layer 3 both expose internal state snapshots in their models so the tests can assert behavior without depending on Kafka consumers.
+- The backtesting package mirrors the live layer boundaries so replay can reuse the same implementation surfaces rather than maintaining a parallel simulation stack.
 
-### Canonical message contracts (Pydantic)
+The current limitation is that the backtest engine still does not consume real Layer 3 trade signals end-to-end in the same way a live trading session eventually should. It does, however, exercise the risk layer directly through the backtest harness and records the resulting metrics.
 
-All key message contracts live in `shared/schemas.py`:
+## Phase 0 — Project framing and scaffolding
 
-- `NormalizedTick` — produced by Layer 1 ingestion (per-exchange WS adapters)
-- `ValidatedTick` — produced by Layer 1 validation (consensus + trust + hash-chain)
-- `ScoredTick` — produced by Layer 2 (anomaly score + regime + system state)
+Phase 0 is complete.
 
-These models are configured with `extra="forbid"` to prevent silent schema drift.
+The repo has a coherent structure and a single source of truth for the blueprint. The active plan is in `plan.md`, the source blueprint is `trading_blueprint_final.docx.md`, and the implementation narrative is centered in this file.
 
----
+The scaffold covers:
 
-## Phase 1 — Foundation Stack (Docker + Kafka + Monitoring)
+- shared schemas and utilities,
+- service packages per layer,
+- a testing layout,
+- configuration files,
+- monitoring config,
+- and the Docker compose foundation.
 
-### What we implemented
+## Phase 1 — Foundation stack
 
-- **Kafka + ZooKeeper** with a reliable local developer experience.
-- **Prometheus** configured to scrape service metrics.
-- **Grafana** provisioned with a Prometheus datasource (`ops/grafana/provisioning/datasources/datasource.yml`).
-- **A reference metrics service** (`services/metrics`) implemented with FastAPI.
-- A host-side **Kafka smoke test** script that validates produce/consume and consumer-group semantics.
+Phase 1 is complete and stable.
 
-### Why this matters
+Implemented and working:
 
-Before building trading logic, we need:
+- ZooKeeper and Kafka in `docker-compose.yml`.
+- Host and container Kafka listener paths.
+- Prometheus scrape config in `ops/prometheus/prometheus.yml`.
+- Grafana datasource provisioning in `ops/grafana/provisioning/datasources/datasource.yml`.
+- `services/metrics/app/main.py` as a minimal FastAPI metrics sample.
+- `scripts/kafka_smoke_test.py` for produce/consume and consumer-group validation.
 
-- A durable event bus (Kafka) to make each layer independently testable.
-- Observability from day one, so later security and anomaly properties can be verified with data.
+The current stack reflects the blueprint’s basic operational goals, but the later phases still need the remaining container services and web frontend/backend.
 
-### Where to look
+Additional operational detail:
 
-- Compose stack: `docker-compose.yml`
-- Prometheus scrape config: `ops/prometheus/prometheus.yml`
-- Grafana datasource provisioning: `ops/grafana/provisioning/datasources/datasource.yml`
-- FastAPI metrics service: `services/metrics/app/main.py`
-- Kafka smoke test: `scripts/kafka_smoke_test.py`
+- The compose stack is already good enough for local integration work and smoke testing.
+- Monitoring is present from the start, which keeps later service additions observable without retrofitting metrics plumbing.
+- Kafka listener configuration distinguishes host access from container-to-container access, which matters on Windows and other local-dev setups.
 
----
+## Phase 2 — Layer 1 data pipeline
 
-## Phase 2 — Layer 1 Data Pipeline (Ingestion → Trust → Validation)
+Phase 2 is implemented and validated.
 
-Layer 1 is the “data integrity engine”. It is responsible for answering:
+### 2.1 Exchange adapters
 
-- Are we seeing consistent prices across exchanges?
-- How fresh is the data?
-- Can we prove continuity and tamper-evidence over time?
-
-### 2.1 Exchange adapters (console-first, then Kafka)
-
-**Implementation:** `services/layer1_ingestion/adapters/`
-
-Each exchange adapter is a WebSocket client that streams live updates and emits a normalized `NormalizedTick`.
-
-Implemented adapters:
+Implemented adapters live under `services/layer1_ingestion/adapters/`:
 
 - Binance
 - Coinbase
 - Kraken
 - OKX
-- Bybit (uses Bybit v5 `public/linear` ticker stream so bid/ask are available)
+- Bybit
 
-Common adapter behavior is in `services/layer1_ingestion/adapters/base.py`:
+Shared adapter behavior in `services/layer1_ingestion/adapters/base.py` includes:
 
-- **TLS certificate pinning** is checked before connecting.
-- **Heartbeat liveness**: if no message arrives within a timeout window, we perform a ping/pong check; failure triggers reconnect.
-- **Reconnect strategy**: exponential backoff with jitter.
-- **REST snapshot on reconnect**: best-effort informational fetch (Phase 2.1).
+- TLS pin verification before connect.
+- Heartbeat / timeout detection.
+- Exponential backoff reconnect logic.
+- REST snapshot fetch on reconnect.
+- Normalization into `NormalizedTick`.
 
-Normalized ticks contain:
+Implementation note:
 
-- `bid`, `ask`, `last_price`
-- `volume_24h`
-- `exchange_timestamp_ms` and `received_timestamp_ms` (critical for latency scoring)
+- Kraken deliberately marks `timestamp_source="receive"` because the feed does not provide a trustworthy exchange-side timestamp in the same way the others do.
+- The raw publisher now serializes `RawTick` rather than the broader normalized type so downstream hashing and contract checking stay explicit.
 
-Unit tests validate parsing logic:
+### 2.2 TLS pinning
 
-- `tests/test_layer1_adapters.py`
+Implemented in `shared/tls_pinning.py` with config in `config/tls_pins.json`.
 
-Audit events throughout Layer 1 are emitted via `shared/audit.py` as structured JSON lines to stdout (and optionally to a file via `AUDIT_LOG_PATH`). This is a Phase 2 stub; later blueprint phases will route audit events into Kafka and persist them in a dedicated audit layer.
+Behavior that is present:
 
-### 2.2 TLS certificate pinning
+- Fingerprint comparison against pinned SHA-256 values.
+- Refusal on mismatch.
+- Expiry warning when the cert is near expiration.
+- Helper script for extracting fingerprints.
 
-**Pins live in:** `config/tls_pins.json`
+### 2.3 Raw Kafka topic
 
-**Implementation:** `shared/tls_pinning.py`
+`market.ticks.raw` is implemented as the Layer 1 ingress topic.
 
-At runtime, adapters verify that the leaf certificate fingerprint matches the expected value. There is also a non-fatal **expiry warning** audit event emitted when a certificate is within 30 days of expiry.
+The raw publisher uses a bounded queue and degrades by dropping oldest messages during Kafka outage pressure, which matches the plan’s general buffer requirement closely enough for the current checkpoint.
 
-A helper script exists to print fingerprints:
+### 2.4 Consensus engine
 
-- `scripts/print_tls_fingerprint.py`
+Implemented in `services/layer1_consensus/engine.py`.
 
-Unit test:
+Current behavior:
 
-- `tests/test_tls_pinning.py`
+- 50 ms alignment windows.
+- Divergence tolerance around 0.3%.
+- Quarantine of divergent sources.
+- Re-evaluation of quarantined sources on subsequent windows.
+- Escalation after repeated divergence.
+- Volume-weighted median consensus on usable sources.
 
-Operational note: certificate rotation will intentionally break connectivity until pins are updated.
+The aligner also carries last-known-value fill and staleness gating, which makes the active-source denominator more realistic when exchanges are temporarily silent.
 
-### 2.3 Kafka integration for raw ticks (`market.ticks.raw`)
+Behavioral note:
 
-Layer 1 ingestion can run in “print-only” mode or publish to Kafka.
+- Used sources are sorted and de-duplicated before being carried forward, which makes the hash chain and validated output stable across equivalent input ordering.
 
-- Entry point: `services/layer1_ingestion/run_console.py`
-- Kafka publisher: `services/layer1_ingestion/kafka_publisher.py`
+### 2.5 Trust scorer
 
-Operational note: when running from repo root, prefer module execution so imports resolve consistently (and `--duration` shutdown is reliable):
+Implemented in `services/layer1_trust/scoring.py`.
 
-```powershell
-.\.venv\Scripts\python -m services.layer1_ingestion.run_console --symbols BTC-USDT --sources binance,coinbase,kraken,okx,bybit --no-kafka --duration 60
-```
+The trust score is the weighted sum of:
 
-A long-running stability runner exists for live feed soak testing:
+- T1 TLS validity,
+- T2 consensus agreement,
+- T3 freshness decay,
+- T4 sequence integrity,
+- T5 hash-chain continuity.
 
-- `services/layer1_ingestion/soak_runner.py`
+The current implementation includes:
 
-The publisher implements a blueprint-style **bounded outage buffer**:
+- config-driven weights from `config/trust_weights.json`,
+- freshness half-life at 25 ms for T3,
+- a time-decayed T2 helper over aligned ticks,
+- sequence-gap handling,
+- binary hash-chain continuity scoring.
 
-- Messages are queued in memory.
-- If Kafka is unavailable and the queue is full, the system **drops the oldest** (or, if it still can’t enqueue, drops the new one) and emits an audit event.
-- Topic creation can be ensured via `KAFKA_ENSURE_TOPICS`.
+Important nuance: the current code also preserves compatibility for missing sequence IDs by not penalizing the score when sequence information is unavailable.
 
-### 2.4 Consensus engine (divergence quarantine)
+This matters because some feeds do not expose sequence numbers consistently, and the pipeline is designed to degrade gracefully instead of treating missing metadata as a hard failure.
 
-**Implementation:** `services/layer1_consensus/engine.py`
+### 2.6 Hash chain
 
-Core behavior:
+Implemented in `services/layer1_hashlog/hash_chain.py`.
 
-- Align ticks by symbol into a **50ms aggregation window** (`TickAligner`).
-- For each aligned window, compute an unweighted median to detect divergence.
-- Any source outside a **0.3% tolerance** is flagged divergent and placed into **quarantine**.
-- Quarantined sources are re-evaluated on subsequent windows; if they return within tolerance they are released.
-- A **3-strike escalation** emits an audit event (`consensus.divergence.escalated`).
-- Consensus price uses a **volume-weighted median** of usable sources.
+The chain is append-only, asynchronously written, and verifiable. The chain hash uses canonical JSON over the required tick fields plus `previous_hash`.
 
-Unit tests:
+The hash payload currently includes the primary exchange, the primary exchange mid, the consensus mid, the used/divergent source sets, and the trust score so the hash log carries enough context for integrity checks and audit reconstruction.
 
-- `tests/test_layer1_consensus.py`
+### 2.7 Validated-topic wiring
 
-### 2.5 Trust score (T1–T5)
+Implemented in `services/layer1_validated/service.py`.
 
-**Implementation:** `services/layer1_trust/scoring.py`
+What the service does:
 
-The trust score is a weighted sum of five sub-scores:
+- consumes raw ticks,
+- records exchange liveness,
+- aligns windows,
+- runs consensus,
+- requires the primary exchange to participate in the consensus set,
+- computes trust subscores,
+- appends the validated chain entry,
+- publishes `ValidatedTick` to `market.ticks.validated`.
 
-- **T1** TLS validity (binary)
-- **T2** consensus agreement (freshness-weighted, time-decayed; uses a half-life of 7.5s)
-- **T3** freshness = exp(-λ·latency_ms), with 25ms half-life
-- **T4** sequence integrity penalty (currently no penalty when sequence IDs are not available)
-- **T5** hash-chain continuity (binary)
+The validated schema carries the fields needed by later layers, including optional `volume_24h`, `spread`, and liveness metadata.
 
-Layer 1 also implements a “combined trust fix” around agreement/availability:
+The service also keeps a per-exchange sequence-gap tracker for the primary exchange and treats missing primary participation as a skip condition rather than fabricating a consensus record.
 
-- **Last-known-value (LKV) fill** in the aligner so short per-exchange gaps don’t collapse the active denominator.
-- **Staleness gating** so LKV is only used while it is fresh enough.
-- **Active-source denominator** so agreement is computed against the set of sources that are actually active in the window.
-- **Separate liveness monitoring** so “an exchange is silent” is tracked independently from the trust score.
+## Phase 3 — Offline HMM training
 
-Weights are loaded from `config/trust_weights.json` via `load_trust_weights()`.
+Phase 3 is implemented and operational.
 
-Unit tests:
+The training code lives under `services/hmm_training/` and currently uses a 2-state Gaussian HMM chosen from empirical separation on the available data. That is a deliberate implementation choice even though the blueprint’s prose discusses a 3-state regime model in places.
 
-- `tests/test_layer1_trust_scoring.py`
+Implemented pieces:
 
-### 2.6 Internal hash log (hash chain)
+- Binance Vision historical download and normalization.
+- Realized-volatility feature construction.
+- HMM training and model serialization with joblib.
+- Metadata output with training parameters and regime summary.
 
-**Implementation:** `services/layer1_hashlog/hash_chain.py`
+Current artifact locations:
 
-Each validated window is appended to an **append-only JSONL hash chain**, where:
+- `artifacts/hmm/model.pkl`
+- `artifacts/hmm/metadata.json`
 
-- `tick_hash = SHA256(canonical_json({symbol, consensus_mid, trust_score, received_timestamp_ms, previous_hash}))`
-- The log is written asynchronously.
-- `verify_hash_chain()` recomputes hashes and validates continuity.
+Training detail:
 
-Unit test:
+- The code records the chosen state count in metadata so the runtime classifier can validate that the loaded artifact matches the expected posterior shape.
+- The 2-state choice is reflected in both the trainer defaults and the Layer 2 classifier, which avoids silent shape mismatches when the model loads.
 
-- `tests/test_layer1_hash_chain.py`
+## Phase 4 — Layer 2 anomaly detection
 
-### 2.7 Wiring: validated topic (`market.ticks.validated`)
+Phase 4 is implemented and live-validated.
 
-**Implementation:** `services/layer1_validated/service.py`
+Implemented in `services/layer2_anomaly/engine.py` and `services/layer2_anomaly/service.py`.
 
-This service consumes raw ticks, builds aligned windows, runs consensus + trust scoring + hash-chain append, then publishes `ValidatedTick` using a buffered publisher (`services/layer1_validated/kafka_json_publisher.py`).
+### Rolling features
 
-`ValidatedTick` now includes two optional fields (added for Layer 2 feature construction):
+The engine maintains rolling buffers for:
 
-- `volume_24h` (aggregated median across used sources)
-- `spread` (aggregated relative spread `(ask-bid)/mid`)
+- log return,
+- log volume,
+- spread,
+- realized volatility history.
 
-These are optional for backward compatibility with previously emitted messages.
+### Regime inference
 
-Additionally, Layer 1 validation wires an `ExchangeLivenessMonitor` which emits `exchange_silent` / `exchange_recovered` audit events and can attach a per-exchange overdue map to each validated output.
+The HMM wrapper loads the offline model artifact and emits:
 
----
+- regime label,
+- posterior probability vector.
 
-## Phase 3 — Offline HMM Training (Regime Classifier)
+### Anomaly detection
 
-Layer 2’s regime classifier is trained offline and loaded at runtime.
+The anomaly stack combines:
 
-### What it does
+- Isolation Forest with background retraining and atomic model swap,
+- Half-Space Trees with the correct score-before-learn order,
+- weighted score fusion,
+- regime-sensitive MAD guard,
+- and a four-state decision gate with hysteresis.
 
-- Downloads 90 days of Binance Vision daily zip files (1m klines by default).
-- Computes 30-minute realized volatility.
-- Trains a **3-state Gaussian HMM** (`hmmlearn.hmm.GaussianHMM`).
-- Serializes the model using **joblib** and writes metadata.
+Implementation detail:
 
-### Key implementation details
+- The service keeps polling Kafka rather than blocking forever on the consumer iterator so the watchdog can enforce a missing-data halt when no validated ticks arrive.
+- The watchdog path is idempotent; once the service has forced HALT for silence, it does not emit repeated timeout events every poll cycle.
 
-**Downloader/parser:** `services/hmm_training/binance_vision.py`
+### Current implementation detail worth preserving
 
-- Handles Binance Vision “missing day” behavior by treating HTTP 404 as `FileNotFoundError`.
-- Normalizes timestamps to milliseconds (some datasets appear to use microseconds/nanoseconds).
+The Layer 2 code currently uses a 2-state HMM and regime-specific MAD multipliers `{4.0, 8.0}`. That is consistent with the current training artifact, but it should be remembered as an empirical implementation choice rather than a literal match to every line of the blueprint text.
 
-**Trainer:** `services/hmm_training/train.py`
+### Kafka wiring
 
-- Defaults `--end-date` to **yesterday** to avoid “today’s file not posted yet” failures.
-- Writes artifacts to `artifacts/hmm/`:
-  - `model.pkl`
-  - `metadata.json`
+Layer 2 consumes `market.ticks.validated` and publishes `market.ticks.scored`.
 
-### How to run
+### Validation status
 
-Install ML deps:
+Layer 2 has already been live-validated in Kafka integration, and the repo contains tests covering the rolling window, HMM bounds, IF retraining, HST ordering, MAD, and decision-gate behavior.
 
-```powershell
-.\.venv\Scripts\python -m pip install -r requirements-ml.txt
-```
+## Phase 5 — Backtesting engine
 
-Train:
+Phase 5 is materially implemented.
 
-```powershell
-.\.venv\Scripts\python -m services.hmm_training.train --days 90 --symbols BTCUSDT,ETHUSDT
-```
+Implemented under `services/backtesting/`:
 
----
+- deterministic time control,
+- historical tick loader,
+- synthetic multi-source generation,
+- attack scenario injection hooks,
+- live Layer 1 / Layer 2 simulation wrappers,
+- metrics collection,
+- SQLite results persistence,
+- HTML report generation,
+- walk-forward execution,
+- permutation testing.
 
-## Phase 4 — Layer 2 Market Anomaly Detection (Scoring + Decision Gate)
+### What the backtest currently measures
 
-Layer 2 attaches the “market safety envelope” to every validated tick: anomaly score, regime, and system state.
+The engine already records:
 
-### 4.1 Rolling statistics & feature window
+- gross P&L,
+- net P&L,
+- Sharpe ratio,
+- max drawdown,
+- win rate,
+- latency proxy,
+- NORMAL-state percentage,
+- anomaly detection metrics,
+- false positives,
+- attack detection timing,
+- permutation p-value.
 
-**Implementation:** `services/layer2_anomaly/engine.py`
+The result bundle also persists equity curves, config snapshots, scoring events, and SQLite run records so runs can be inspected after the fact instead of only being printed to stdout.
 
-Per symbol, Layer 2 maintains:
+### Current limitation
 
-- A rolling window of 500 ticks (raw return, log-volume, spread)
-- Rolling mean/std for z-scoring
-- Rolling MAD (median absolute deviation) for robust return guard
-- A 30-minute realized volatility accumulator feeding the HMM
+The backtest still uses Layer 2 system-state transitions as the trade trigger proxy in the core replay path. It does not yet consume actual Layer 3 `TradeSignal` objects end-to-end. That is the main reason Phase 5/6 validation should still be treated as incomplete from a blueprint-purity perspective.
 
-### 4.2 HMM regime inference
+Practical consequence:
 
-**Implementation:** `HMMRegimeClassifier` in `services/layer2_anomaly/engine.py`
+- The backtest is good enough for verifying deterministic replay, anomaly response, and risk gating, but it is not yet the final proof that the live signal-to-execution chain is complete.
 
-- Loads `artifacts/hmm/model.pkl` via joblib.
-- Updates a rolling RV history.
-- Computes:
-  - `regime` via Viterbi (`predict()`)
-  - `regime_posterior` via `predict_proba()`
+### Walk-forward and permutation testing
 
-### 4.3 Feature vector construction
+Implemented helper modules:
 
-Layer 2 constructs a feature vector aligned with the blueprint:
+- `services/backtesting/walk_forward.py`
+- `services/backtesting/permutation_test.py`
 
-- f1: log return (z-scored)
-- f2: log volume (z-scored; uses `volume_24h` when present)
-- f3: spread (z-scored; uses `spread` when present)
-- f4: regime (discrete)
-- f5: trust score (bounded)
-- f6: time-of-day sin/cos (bounded)
+The walk-forward helper runs rolling windows over a historical slice and writes a summary artifact.
 
-If `volume_24h` or `spread` are missing, Layer 2 currently falls back to 0.0 for that raw feature.
+The permutation helper currently approximates blueprint significance testing by shuffling returns / equity deltas. That is useful and reproducible, but it is not yet the exact trade-entry-timestamp shuffle described in the blueprint.
 
-### 4.4 Parallel anomaly detectors
+The walk-forward helper writes a summary artifact for each run, which makes it easy to compare folds without rerunning the whole replay.
 
-Two detectors run in parallel:
+### Validation outputs already produced
 
-- **Isolation Forest** (`sklearn.ensemble.IsolationForest`): retrained periodically in a background thread, with an atomic model swap.
-- **Half-Space Trees** (`river.anomaly.HalfSpaceTrees`): truly streaming, updated every tick.
+The repo now contains real run artifacts under `artifacts/` for:
 
-A critical implementation detail from the blueprint is enforced:
+- historical data fetches,
+- backtest reports,
+- walk-forward summaries,
+- tuning results,
+- tuned threshold snapshots.
 
-- **HST scores first, then learns** (`score_one()` then `learn_one()`), to avoid artificially deflating “novelty”.
+## Phase 6 — Layer 3 strategy engine
 
-### 4.5 Fusion + MAD guard
+Phase 6 is implemented through the current checkpoint.
 
-Fusion is a weighted combination:
+Implemented in `services/layer3_strategy/`:
 
-- `A_combined = 0.45 * IF + 0.55 * HST` (weights configurable via env)
+- candle aggregation,
+- indicator computation,
+- order flow imbalance,
+- dual-timeframe signal logic,
+- position sizing,
+- Kafka service wiring,
+- bootstrap helpers,
+- tuning helpers.
 
-MAD guard:
+### Candle aggregation
 
-- Uses regime-dependent multipliers k={3,5,8}
-- If the raw return exceeds k·MAD, we floor the final anomaly score to at least 0.65.
+`services/layer3_strategy/candles.py` builds 5m and 1h candles from `ScoredTick`.
 
-### 4.6 Decision gate with hysteresis
+Key behavior:
 
-**Implementation:** `DecisionGate` in `services/layer2_anomaly/engine.py`
+- OHLCV plus metadata.
+- `avg_trust_score` and `max_anomaly_score` tracking.
+- reliability rule based on trust/anomaly thresholds.
+- discarding candles with fewer than 3 ticks.
+- consecutive unreliable candle counting.
+- `system_state_override="DEGRADED"` once the streak threshold is reached.
 
-The system state is a function of:
+That override is carried in the candle model and used by strategy tests, but the service still has one remaining integration gap where it should more explicitly force the downstream decision path to respect the degraded candle state.
 
-- Trust threshold (default 0.60)
-- Anomaly threshold (default 0.55)
+### Indicators
 
-Base matrix:
+`services/layer3_strategy/indicators.py` computes from scratch:
 
-- High trust + low anomaly → NORMAL
-- High trust + high anomaly → CONSERVATIVE
-- Low trust + low anomaly → DEGRADED
-- Low trust + high anomaly → HALT
+- RSI,
+- MACD,
+- Bollinger Bands,
+- EMA crossover,
+- ATR.
 
-Hysteresis:
+### Order Flow Imbalance
 
-- Downgrades are immediate (safety-first).
-- Upgrades require **10 consecutive qualifying ticks**.
-- Leaving HALT requires **10 consecutive NORMAL-qualifying ticks**.
+`services/layer3_strategy/ofi.py` computes a rolling 50-tick OFI over signed volume, bounded to `[-1, 1]`.
 
-### 4.7 Output contract (`market.ticks.scored`)
+### Signal logic
 
-**Schema:** `shared/schemas.py` → `ScoredTick`
+`services/layer3_strategy/signals.py` implements the pure dual-timeframe decision gate:
 
-`ScoredTick` includes all `ValidatedTick` fields plus:
+- system-state gate,
+- primary 5m gate,
+- mandatory OFI confirmation,
+- higher-timeframe confluence check,
+- signal-strength scoring.
 
-- `anomaly_score`, `if_score`, `hst_score`
-- `regime`, `regime_posterior`
-- `system_state`
-- `mad_guard_triggered`
+### Position sizing
 
-**Service entry point:** `services/layer2_anomaly/service.py`
+`services/layer3_strategy/sizing.py` applies the blueprint formula:
 
----
+- base size,
+- state multiplier,
+- confluence multiplier,
+- signal-strength multiplier.
 
-## Observability (Prometheus metrics per service)
+### Service wiring
 
-### Metrics endpoints
+`services/layer3_strategy/service.py` consumes `market.ticks.scored`, maintains symbol state, feeds candles into indicators, evaluates signals, sizes them, and publishes trade signals.
 
-- `metrics-service`: `:9100/metrics` (FastAPI)
-- `layer1-ingestion`: `:9101/metrics` (minimal HTTP server)
-- `layer1-validated`: `:9102/metrics` (minimal HTTP server)
-- `layer2-anomaly`: `:9103/metrics` (minimal HTTP server)
+The service intentionally keeps symbol-local state in memory, which makes the tests fast and deterministic, but it also means that a future production deployment will need explicit restart/recovery handling for warm state reconstruction.
 
-The minimal metrics server is implemented in `shared/metrics_http.py`.
+### Bootstrap and tuning
 
-### Prometheus configuration
+Additional support files are present for:
 
-Targets are defined in `ops/prometheus/prometheus.yml`. Scrape interval is 5 seconds.
+- initial candle bootstrap via Binance REST,
+- strategy tuning and backtest-driven parameter sweeps.
 
-Grafana is configured to point at Prometheus via Docker DNS (`http://prometheus:9090`).
+### Important remaining Layer 3 caveat
 
----
+The candle-level `system_state_override` is carried by the candle model, but the service still evaluates signals using the upstream tick state rather than fully replacing it with the candle override at the decision point. That means the 50-unreliable-candle degradation rule is represented in the data model but not yet fully enforced in the strategy decision flow.
 
-## Testing & Verification
+This is a real behavioral gap rather than a documentation gap, and it should stay visible until the execution path is tightened.
 
-### Unit tests
+## Phase 6.8 — Tuning and validation artifacts
 
-The repo includes focused tests that validate the most failure-prone logic:
+The tuning workflow now exists as a real artifact chain:
 
-- Adapter message parsing: `tests/test_layer1_adapters.py`
-- Bybit parsing + snapshot/delta merge: `tests/test_bybit_adapter_parsing.py`
-- Divergence quarantine and escalation: `tests/test_layer1_consensus.py`
-- Trust score math: `tests/test_layer1_trust_scoring.py`
-- Weighted T2 + LKV/staleness behavior: `tests/test_layer1_t2_lkv_fix.py`
-- Hash chain integrity: `tests/test_layer1_hash_chain.py`
-- TLS pinning refusal on mismatch: `tests/test_tls_pinning.py`
+- tuning grid search,
+- walk-forward runner,
+- tuned-threshold snapshot save script,
+- saved JSON artifacts under `artifacts/tuning/`.
 
-To run all tests:
+The current checkpoint is enough to say Phase 6.8 is functionally present, but the tuning methodology is still not the final blueprint-grade strategy calibration pass because Layer 3 thresholds are not yet tuned through a direct signal-level harness.
 
-```powershell
-.\.venv\Scripts\python -m pytest -q
-```
+## Phase 7 — Layer 4 risk management
 
-### Runtime verification (host, no Kafka)
+Phase 7 is implemented and integrated into the backtest harness. The implementation follows the blueprint's acceptance criteria: the eight pre-execution checks, ATR-derived stops/targets, and a circuit-breaker state machine, plus backtest-level metrics and reporting so behavior is observable and testable.
 
-Console ingestion (prints live normalized ticks):
+Implemented artifacts and locations:
 
-```powershell
-.\.venv\Scripts\python -m services.layer1_ingestion.run_console --symbols BTC-USDT --sources binance,coinbase,kraken,okx,bybit --no-kafka --duration 60
-```
+- Risk engine implementation: `services/layer4_risk/engine.py` — `Layer4RiskEngine` implements the configured pre-execution checks, circuit-breaker state machine, ATR-derived stop/take logic, and an in-memory risk state tracker used by the backtest harness.
+- Package export: `services/layer4_risk/__init__.py` — convenience exports for the engine and types.
+- ApprovedOrder contract: `shared/schemas.py` — added `ApprovedOrder` Pydantic model and fields (symbol, direction, size_pct, stop_loss_price, take_profit_price, atr, trust_score, circuit_breaker_state, portfolio_exposure_pct, snapshots, risk_adjustments, reason).
+- Backtest wiring: `services/backtesting/engine.py` — instantiates `Layer4RiskEngine`, routes emitted `TradeSignal` objects through `evaluate_signal(...)`, and simulates fills for returned `ApprovedOrder` objects.
+- Backtest metrics: `services/backtesting/metrics.py` — added `risk_approved_orders`, `risk_rejected_orders`, `risk_reduced_ticks`, `risk_halted_ticks` and included them in serialized metrics output.
+- Tests: `tests/test_layer4_risk.py` (unit coverage for checks and circuit-breaker) and `tests/test_backtesting_phase5.py` (integration: backtest routes signals through Layer 4 and asserts risk metrics).
 
-Expected:
+Features implemented:
 
-- `adapter_connect` audit events for configured sources.
-- Tick lines containing `exchange_id` for all sources.
+- Eight pre-execution checks are applied in-order inside `Layer4RiskEngine.evaluate_signal`.
+- ATR-based stops and targets are computed from the primary-timeframe ATR exposed inside the signal snapshot.
+- Circuit breaker states are `NORMAL`, `REDUCED`, and `HALTED`.
+- Backtest integration records approved versus rejected outcomes, updates risk metrics, and appends risk state and position size to equity rows for reporting.
 
-Layer 1 end-to-end soak + report (runs adapters locally, runs consensus/trust/hash-chain, writes a Markdown report):
 
-Note: the script starts a fresh hash-chain log per run so repeated runs don’t fail verification due to previous-log reuse.
+## Phase 8 — Layer 5 execution (newly added)
 
-```powershell
-.\.venv\Scripts\python scripts/layer1_e2e_test.py --symbols BTC-USDT --duration 120 --output artifacts/reports/
-.\.venv\Scripts\python scripts/layer1_e2e_test.py --symbols BTC-USDT --duration 1200 --output artifacts/reports/
-```
+Status: partially implemented and integrated into the backtest harness (May 2026).
 
-Most recent 20-minute report:
+What was added:
+- `services/layer5_execution/engine.py` — `ExecutionEngine`, `OrderRecord`, `ExecutedOrder`. The engine accepts an approved-order mapping, delegates to an adapter, and records order/execution facts.
+- `services/layer5_execution/adapters.py` — `SimulatedExecutionAdapter` including configurable `slippage_pct`, `fee_pct`, and `partial_fill_threshold` semantics; returns a deterministic `SimulatedFillResult` used in tests and backtests.
+- `services/layer5_execution/__init__.py` — package export.
+- `tests/test_layer5_execution.py` — unit tests for full fill and partial-fill behaviors, fees, and slippage.
 
-- `artifacts/reports/layer1_e2e_20260428_160028.md`
+Backtest integration:
+- `services/backtesting/engine.py` now instantiates an `ExecutionEngine` (with the `SimulatedExecutionAdapter`) and submits `ApprovedOrder` objects returned by the risk engine to `ExecutionEngine.submit_order()`.
+- The backtest uses executed fill price for position entry and close and applies `fee_paid` returned by the adapter to `net_cash` to track net P&L.
 
-### End-to-end checks (Kafka topics)
+Notes and limitations:
+- The execution layer in this checkpoint implements deterministic paper-trading simulation and basic fee handling. It intentionally does not yet implement the full blueprint order lifecycle (retry/backoff/dead-letter, durable idempotency, startup reconciliation). Those are planned next and remain critical for production-grade reconciliation and crash resilience.
+- Tests for adapter behavior pass locally (`tests/test_layer5_execution.py`). The end-to-end backtest now records execution-level fields in the equity curve and metrics; this improves realism for Phase 10 validation work.
 
-From the host, you can consume topics using the provided scripts:
+Next steps recommended (Phase 8 continuation):
+- Implemented: idempotency store (`services/layer5_execution/persistence.py`) with WAL SQLite, deterministic `client_order_id` generation, persist-before-send behavior, retry/backoff with jitter, and dead-letter queueing.
+- Implemented: startup reconciliation now queries adapter order status for pending WAL entries and resolves confirmed/filled orders without blind resubmission.
+- Implemented: duplicate-order responses are treated as success when the adapter query reports a terminal order.
+- Implemented: `SimulatedExecutionAdapter` now carries deterministic latency, per-exchange fee schedules, and configurable partial-fill behavior.
+- Added unit and integration tests under `tests/test_layer5_execution_persistence.py` that verify retry-to-confirm, retry-to-dead-letter, duplicate-order handling, and crash-recover startup reconciliation.
 
-- Raw ticks: `scripts/consume_market_ticks_raw.py`
-- Validated ticks: `scripts/consume_market_ticks_validated.py`
-- Scored ticks: `scripts/consume_market_ticks_scored.py`
 
-There is also a smoke test for Kafka correctness:
+How the engine behaves in practice:
 
-- `scripts/kafka_smoke_test.py`
+- It rejects hold signals early and treats upstream HALT/DEGRADED states as hard gates, with CLOSE_ALL as the exception.
+- It caps raw signal size, applies reduced-state throttling, and then rechecks per-trade loss against the ATR-derived stop distance.
+- It only approves orders when the resulting exposure fits inside the portfolio cap and the ATR is present and usable.
+- It keeps a short in-memory alert list so the backtest can surface why the circuit breaker changed state.
 
-From inside the Kafka container, you can also use `kafka-console-consumer`.
+Validation and status:
 
----
+- Targeted tests for the risk layer and the backtest integration passed in the most recent run.
+- The combined targeted run reported 29 passing tests across the touched suites.
+- CSV/equity and metrics outputs were updated and validated to include the new risk fields.
 
-## How to Run the Current System
+Caveats and scope notes:
 
-### Bring up the full stack
+- Execution Engine (Phase 8) is still pending. `ApprovedOrder` objects are produced by Layer 4, but no runtime execution consumer is implemented yet. The backtest harness simulates fills based on `ApprovedOrder` outputs.
+- Risk alerts are currently captured in memory (`RiskState.alert_events`) and emitted to the backtest metrics; persistent alerting/audit-topic publication is a Phase 8/9 follow-up.
+- The risk engine was implemented to be deterministic and testable inside the backtest; production wiring (Kafka topics, durable alerting, Prometheus metrics) can be added without changing the core logic.
 
-```powershell
-docker compose up -d --build
-```
+## Observability
 
-Key URLs:
+Prometheus metrics endpoints are present for the running Python services:
 
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3000` (admin/admin)
-- Targets page: `http://localhost:9090/targets`
+- `metrics-service` on `:9100/metrics`
+- `layer1-ingestion` on `:9101/metrics`
+- `layer1-validated` on `:9102/metrics`
+- `layer2-anomaly` on `:9103/metrics`
+- `layer3-strategy` on `:9104/metrics`
 
-### Confirm scored ticks are flowing
+The services use the shared lightweight HTTP helper in `shared/metrics_http.py`.
 
-```powershell
-docker compose exec -T kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic market.ticks.scored --consumer-property auto.offset.reset=latest --max-messages 5
-```
+This setup is intentionally simple: the goal at this stage is to prove each service exports something scrapeable, not to build the final dashboard taxonomy yet.
 
----
+## Testing and verification
 
-## Known Gaps / Not Implemented Yet
+The repository has focused tests for the main failure-prone paths:
 
-This repo is intentionally incomplete beyond Phase 4.
+- exchange adapters,
+- TLS pinning,
+- consensus/quarantine,
+- trust scoring,
+- hash-chain integrity,
+- Layer 2 anomaly scoring and decision gate,
+- Layer 3 candles, indicators, OFI, signals, sizing, service wiring, and bootstrap,
+- Layer 4 risk checks and backtest routing,
+- backtest walk-forward and permutation helpers,
+- scenario comparison and report rendering.
 
-Not yet implemented:
+Current validation status from recent work:
 
-- **Phase 5 / Layer 3**: candle aggregation (5m and 1h), indicator suite, signal generation
-- **Layer 4 risk engine**, **Layer 5 execution**, **Layer 6 audit persistence**
-- A full API backend beyond the simple `metrics-service`
-- Enforced network egress restrictions (Compose currently does not restrict outbound internet per-container)
+- Layer 1 and Layer 2 core suites are green.
+- Layer 3 test suite is present and covers the major strategy components.
+- Layer 4 tests and the backtest integration test passed in the most recent targeted run.
+- The workspace currently reports no syntax/type diagnostics for the touched areas from the latest targeted check.
 
-There are also a few intentional simplifications in the current layers:
+The strongest recent signal is the targeted pytest run that covered Layer 4 plus the adjacent backtest and Layer 3 contract tests in one pass.
 
-- Layer 1 sequence gap scoring is not fully wired across all exchanges (missing sequence IDs are treated as no penalty).
-- Layer 2’s volume/spread features fall back to 0.0 if Layer 1 didn’t provide them (this is why we made those fields optional in `ValidatedTick`).
+Most recent targeted verification command:
 
----
+- `python -m pytest tests/test_layer4_risk.py tests/test_backtesting_phase5.py tests/test_layer3_signals.py tests/test_layer3_sizing.py tests/test_layer3_service.py -q`
 
-## What’s Next (Per Blueprint Order)
+## Known mismatches and caveats
 
-The next phase is **Layer 3 — Trading Strategy Engine**, which (per the blueprint) begins by consuming `market.ticks.scored` and building candle streams, then computing indicators on candles.
+These are the things that still need to be kept explicit so the implementation narrative stays honest.
 
-A key boundary decision is already in place conceptually:
+1. The backtest engine does not yet trade on actual Layer 3 `TradeSignal` objects end-to-end in the same way a live deployment eventually should.
+2. The permutation test is still an approximation of the blueprint’s exact timestamp-shuffle procedure.
+3. The Layer 3 candle degradation override is modeled, but the service does not yet apply it at signal-evaluation time.
+4. The HMM is implemented as 2-state in code, so any 3-state blueprint language should be treated as a design discussion point, not as the current runtime state.
+5. Phases 8-12 are not implemented yet.
 
-- Layers 1–2 remain tick-level for integrity/anomaly detection.
-- The Layer 2 → Layer 3 boundary is where we shift to **candle-based** strategy logic.
+Additional known simplifications:
+
+- The current report and tuning helpers are useful operational artifacts, but they still reflect the backtest-centric implementation phase rather than a fully productionized control plane.
+- Some of the longer-form markdown files in `services/backtesting/` and `services/layer2_anomaly/` are specs and implementation notes rather than runtime code, which is intentional.
+
+## How this file should be maintained
+
+Treat this document as the live implementation ledger.
+
+- Update it when a phase becomes runnable, validated, or structurally changed.
+- Record both what exists and what remains missing.
+- Keep the mismatch section current.
+- Do not silently upgrade a phase description to “done” unless the code and tests actually support that claim.
+
+## Next implementation priority
+
+The next work should stay in strict blueprint order:
+
+1. Phase 8 execution engine.
+2. Phase 9 audit persistence and alert plumbing.
+3. Phase 10 statistical validation closure.
+4. Phase 11 web interface.
+5. Phase 12 demo polish and integration hardening.
+
+If the next turn stays in implementation mode, Phase 8 is the correct mechanical next step because it consumes the `ApprovedOrder` contract introduced by Phase 7.
+
+That is the current truthful state of the project.

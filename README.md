@@ -69,6 +69,29 @@ You should also see `layer1-ingestion` and `layer1-validated` as **UP**.
 
 ## Phase 2 (in progress): Layer 1 adapters
 
+Layer 1 is the trust boundary. It ingests exchange data via secure WebSocket adapters, applies consensus and trust scoring, and outputs a validated tick stream.
+
+See [layer1_implementation.md](layer1_implementation.md) for a detailed architectural walkthrough.
+
+### Layer 1 End-to-End Soak Test
+
+For a complete Layer 1 verification run (adapters, alignment, consensus, trust, hash-chain, and report):
+
+```powershell
+.\venv\Scripts\python scripts\layer1_e2e_test.py --symbols BTC-USDT --duration 900 --output artifacts\reports\
+```
+
+This runs all 5 exchange adapters for 15 minutes and generates a Markdown report in `artifacts/reports/layer1_e2e_*.md` with:
+
+- Ingestion metrics (tick counts, arrival gaps, out-of-order events)
+- Alignment statistics (real vs LKV-filled sources, staleness)
+- Consensus outcomes (true/degraded/no-consensus windows)
+- Trust scores (T1–T5 subscores with percentiles)
+- Liveness events (exchange silence/recovery)
+- Hash-chain verification status
+
+This is the fastest way to validate that Layer 1 is wired correctly end to end.
+
 ### Console adapters (no Kafka)
 
 ```powershell
@@ -76,13 +99,15 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements-dev.txt
 
 $env:SYMBOLS = "BTC-USDT,ETH-USDT"
-$env:EXCHANGES = "binance,coinbase,kraken"
-.\.venv\Scripts\python -m services.layer1_ingestion.run_console
+$env:EXCHANGES = "binance,coinbase,kraken,okx,bybit"
+.\venv\Scripts\python -m services.layer1_ingestion.run_console
 ```
 
-### Phase 2.3: Publish raw ticks to Kafka (`market.ticks.raw`)
+### Publish raw ticks to Kafka (`market.ticks.raw`)
 
-Terminal A (consumer):
+The raw Kafka topic carries `RawTick` messages—the direct output of the adapter layer after exchange-specific parsing. Each raw tick includes an explicit `timestamp_source` field indicating whether the timestamp is exchange-sourced or receive-sourced only (e.g., Kraken).
+
+Terminal A (consume raw ticks):
 
 ```powershell
 $env:KAFKA_BOOTSTRAP_SERVER = "localhost:29092"
@@ -95,19 +120,37 @@ Terminal B (producer via Layer 1 runner):
 $env:PUBLISH_RAW_TO_KAFKA = "1"
 $env:KAFKA_BOOTSTRAP_SERVER = "localhost:29092"
 $env:SYMBOLS = "BTC-USDT"
-$env:EXCHANGES = "binance"
-.\.venv\Scripts\python -m services.layer1_ingestion.run_console
+$env:EXCHANGES = "binance,coinbase,kraken,okx,bybit"
+.\venv\Scripts\python -m services.layer1_ingestion.run_console
 ```
 
-### Phase 2.7: Wiring + validated topic (`market.ticks.validated`)
+### Validated topic (`market.ticks.validated`)
+
+The validated topic carries `ValidatedTick` messages, which are the Layer 1 output after alignment, consensus, and trust scoring. Each validated tick carries:
+
+- **Primary exchange data**: `primary_exchange` (e.g., "binance") and `mid_price` (the price to operate on)
+- **Consensus validation**: `consensus_mid` (multi-source agreement) and `used_sources` (which exchanges participated)
+- **Trust metadata**: Trust score, T1–T5 subscores, divergent sources, and hash-chain link
+
+**Primary Exchange Routing**: The validated service is configured with a primary exchange (default: Binance via `PRIMARY_EXCHANGE` env var). Only windows where the primary exchange successfully participated in consensus produce validated ticks. This ensures downstream layers always operate on a single exchange's data while continuously validating it against multi-source consensus.
 
 Terminal A (start validated service):
 
 ```powershell
 $env:KAFKA_BOOTSTRAP_SERVER = "localhost:29092"
+$env:PRIMARY_EXCHANGE = "binance"  # Optional; defaults to binance
 .\.venv\Scripts\python -m services.layer1_validated.service
 ```
+The validated service:
+- Consumes raw ticks from `market.ticks.raw`
+- Aligns them into 50 ms windows
+- Applies consensus (0.3% divergence tolerance)
+- **Checks if primary exchange is in the consensus set; skips the window if not**
+- Computes trust scores (TLS, agreement, freshness, sequence, hash-chain)
+- Appends entries to the hash-chain log (including both primary and consensus prices)
+- Publishes validated ticks to `market.ticks.validated`
 
+It uses a stable Kafka consumer group and earliest offset reset by default, so restarts do not skip data.
 Terminal B (consume validated ticks):
 
 ```powershell
@@ -121,9 +164,23 @@ Terminal C (produce raw ticks via adapters):
 $env:PUBLISH_RAW_TO_KAFKA = "1"
 $env:KAFKA_BOOTSTRAP_SERVER = "localhost:29092"
 $env:SYMBOLS = "BTC-USDT"
-$env:EXCHANGES = "binance,coinbase,kraken"
-.\.venv\Scripts\python -m services.layer1_ingestion.run_console
+$env:EXCHANGES = "binance,coinbase,kraken,okx,bybit"
+.\venv\Scripts\python -m services.layer1_ingestion.run_console
 ```
+
+### Tracing Layer 1 (debug mode)
+
+To replay alignment and consensus manually while correlating with validated output:
+
+```powershell
+$env:KAFKA_BOOTSTRAP_SERVER = "localhost:29092"
+$env:PRIMARY_EXCHANGE = "binance"  # Optional; must match the validated service's config
+$env:TRACE_MAX_WINDOWS = "12"
+$env:TRACE_MAX_SECONDS = "15"
+.\venv\Scripts\python scripts\trace_layer1_e2e.py
+```
+
+This debug script replays raw ticks through the consensus engine locally and compares the output with what the validated service published to Kafka. It filters windows the same way: only reporting traced windows where the primary exchange is present in the consensus set.
 
 ## Phase 3: HMM training (offline)
 
@@ -133,7 +190,7 @@ Installs ML deps (may take a bit on Windows):
 .\.venv\Scripts\python -m pip install -r requirements-ml.txt
 ```
 
-Train the 3-state GaussianHMM on 30-minute realized volatility (default 90 days):
+Train the 2-state GaussianHMM on 30-minute realized volatility (default 90 days):
 
 ```powershell
 .\.venv\Scripts\python -m services.hmm_training.train --days 90 --symbols BTCUSDT,ETHUSDT
@@ -151,7 +208,7 @@ Layer 2 consumes `market.ticks.validated` and publishes `ScoredTick` messages to
 ### Consume scored ticks (from inside the Kafka container)
 
 ```powershell
-docker compose exec -T kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic market.ticks.scored --consumer-property auto.offset.reset=latest --max-messages 5
+docker compose exec -T kafka kafka-console-consumer --bootstrap-server kafka:9092 --topic market.ticks.scored --consumer-property auto.offset.reset=earliest --max-messages 5
 ```
 
 ### Or consume scored ticks (host Python)
@@ -160,3 +217,18 @@ docker compose exec -T kafka kafka-console-consumer --bootstrap-server kafka:909
 $env:KAFKA_BOOTSTRAP_SERVER = "localhost:29092"
 .\.venv\Scripts\python scripts\consume_market_ticks_scored.py
 ```
+
+## Phase 5: Backtesting engine
+
+Phase 5 replays historical market data through the live Layer 1 and Layer 2 code paths so the system can be validated deterministically on known scenarios.
+
+See [phase5_implementation.md](phase5_implementation.md) for the detailed architecture, outputs, assumptions, and remaining work.
+
+Current outputs for a slice run:
+
+- `metrics.json`
+- `equity_curve.csv`
+- `config_snapshot.json`
+- `report.html`
+
+The Phase 5 runner writes all artifacts into a timestamped directory under `artifacts/reports/` and persists run records in SQLite.

@@ -25,6 +25,7 @@ class TrainingMetadata:
     days: int
     end_date: str
     points: int
+    n_states: int
     regime_order_by_mean: List[int]
     regime_means: List[float]
 
@@ -50,7 +51,7 @@ def _load_series(*, symbol: str, interval: str, days: int, end_date: date, cache
     return times, closes
 
 
-def train_gaussian_hmm(vol_series: List[float], *, n_states: int = 3, seed: int = 42):
+def train_gaussian_hmm(vol_series: List[float], *, n_states: int = 2, seed: int = 42):
     try:
         import numpy as np
         from hmmlearn.hmm import GaussianHMM
@@ -90,7 +91,7 @@ def save_artifacts(
 
 
 def main(argv: List[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Phase 3: Train 3-state GaussianHMM on 30m realized volatility")
+    p = argparse.ArgumentParser(description="Phase 3: Train 2-state GaussianHMM on 30m realized volatility")
     p.add_argument("--symbols", default="BTCUSDT,ETHUSDT", help="Comma-separated Binance symbols")
     p.add_argument("--interval", default="1m", help="Kline interval (Binance Vision)")
     p.add_argument("--days", type=int, default=90, help="Number of days to download")
@@ -119,7 +120,7 @@ def main(argv: List[str] | None = None) -> int:
     if len(vol_all) < 50:
         raise SystemExit(f"Not enough data points to train HMM (got {len(vol_all)})")
 
-    model, order, means = train_gaussian_hmm(vol_all, n_states=3, seed=42)
+    model, order, means = train_gaussian_hmm(vol_all, n_states=2, seed=42)
 
     meta = TrainingMetadata(
         symbols=symbols,
@@ -127,6 +128,7 @@ def main(argv: List[str] | None = None) -> int:
         days=args.days,
         end_date=args.end_date,
         points=len(vol_all),
+        n_states=2,
         regime_order_by_mean=order,
         regime_means=means,
     )

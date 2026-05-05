@@ -54,6 +54,9 @@ from shared.audit import emit_audit_event  # noqa: E402
 from shared.schemas import ExchangeId, NormalizedTick  # noqa: E402
 
 
+PRIMARY_EXCHANGE = os.getenv("PRIMARY_EXCHANGE", "binance")
+
+
 def _median(xs: Iterable[float]) -> float:
     values = list(xs)
     return float(statistics.median(values)) if values else 0.0
@@ -97,8 +100,12 @@ def _table_kv(rows: list[tuple[str, Any]]) -> str:
 
 
 def _median_latency_ms(ticks: list[NormalizedTick], *, now_ms: int) -> float:
-    latencies = [max(0, int(now_ms) - int(t.exchange_timestamp_ms)) for t in ticks]
-    return float(statistics.median(latencies)) if latencies else 0.0
+    latencies = [
+        max(0, int(now_ms) - int(t.exchange_timestamp_ms))
+        for t in ticks
+        if getattr(t, "timestamp_source", "exchange") == "exchange"
+    ]
+    return float(statistics.median(latencies)) if latencies else float("inf")
 
 
 def _median_spread(ticks: list[NormalizedTick]) -> float:
@@ -649,7 +656,11 @@ async def run_test(*, symbols: list[str], duration_s: int, output_dir: Path) -> 
                 if out.consensus_mid is None:
                     continue
 
-                usable_ticks = [t for ex, t in window.by_ex.items() if ex in out.used_sources]
+                primary_tick = window.by_ex.get(PRIMARY_EXCHANGE)
+                if primary_tick is None or PRIMARY_EXCHANGE not in out.used_sources:
+                    continue
+
+                usable_ticks = [primary_tick]
 
                 tolerance = abs(float(out.consensus_mid)) * float(consensus.config.divergence_tolerance)
                 t2 = compute_t2(
@@ -684,7 +695,11 @@ async def run_test(*, symbols: list[str], duration_s: int, output_dir: Path) -> 
                     prev = hashlog.tip
                     _tick_hash, chain_ok = hashlog.append(
                         symbol=window.symbol,
+                        primary_exchange=PRIMARY_EXCHANGE,
+                        primary_mid_price=float(primary_tick.mid),
                         consensus_mid=float(out.consensus_mid),
+                        used_sources=out.used_sources,
+                        divergent_sources=out.divergent_sources,
                         trust_score=float(trust),
                         received_timestamp_ms=int(window.window_end_ms),
                         previous_hash=prev,

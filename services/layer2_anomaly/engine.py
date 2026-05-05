@@ -121,10 +121,11 @@ class HMMRegime:
 
 
 class HMMRegimeClassifier:
-    def __init__(self, *, model_path: str, history_max: int = 500) -> None:
+    def __init__(self, *, model_path: str, expected_states: int = 2, history_max: int = 500) -> None:
         import joblib
 
         self._model = joblib.load(model_path)
+        self._expected_states = int(expected_states)
         self._history: Deque[float] = deque(maxlen=history_max)
 
     def update(self, *, rv_30m: float) -> HMMRegime:
@@ -137,9 +138,10 @@ class HMMRegimeClassifier:
 
         regime = int(states[-1])
         posterior = [float(x) for x in post[-1].reshape(-1).tolist()]
-        # Ensure exactly 3 entries.
-        if len(posterior) != 3:
-            posterior = (posterior + [0.0, 0.0, 0.0])[:3]
+        if len(posterior) != self._expected_states:
+            raise RuntimeError(
+                f"HMM posterior length {len(posterior)} does not match expected state count {self._expected_states}"
+            )
         return HMMRegime(regime=regime, posterior=posterior)
 
 
@@ -239,7 +241,7 @@ class Layer2ScoringEngine:
     ) -> None:
         self._feat = RollingFeatureWindow(maxlen=500)
         self._rv = RollingRV30m()
-        self._hmm = HMMRegimeClassifier(model_path=hmm_model_path)
+        self._hmm = HMMRegimeClassifier(model_path=hmm_model_path, expected_states=2)
         self._if = IsolationForestScorer()
         self._hst = HalfSpaceTreeScorer()
 
@@ -318,9 +320,9 @@ class Layer2ScoringEngine:
         a_combined = (self._if_weight * if_score) + (self._hst_weight * hst_score)
         a_combined = _clamp01(a_combined)
 
-        # MAD guard on raw return.
+        # MAD guard on raw return (2-state model: normal vol regime 0, high vol regime 1).
         mad = self._feat.mad_f1()
-        k = {0: 3.0, 1: 5.0, 2: 8.0}.get(regime.regime, 5.0)
+        k = {0: 4.0, 1: 8.0}.get(regime.regime, 4.0)
         mad_guard_triggered = bool(mad > 0.0 and abs(f1_raw) > (k * mad))
 
         if mad_guard_triggered:
@@ -345,7 +347,7 @@ class DecisionGate:
         self,
         *,
         trust_threshold: float = 0.60,
-        anomaly_threshold: float = 0.55,
+        anomaly_threshold: float = 0.80,
         upgrade_streak_required: int = 10,
     ) -> None:
         self._trust_threshold = float(trust_threshold)

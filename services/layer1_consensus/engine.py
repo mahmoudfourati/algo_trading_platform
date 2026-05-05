@@ -175,7 +175,7 @@ class ConsensusEngine:
         used_sources: List[ExchangeId]
         if len(usable) >= self.config.min_sources_for_consensus:
             consensus_mid = volume_weighted_median(usable)
-            used_sources = [t.exchange_id for t in usable]
+            used_sources = sorted({t.exchange_id for t in usable})
         elif len(usable) == 1:
             # Degraded: not enough sources for a true consensus.
             consensus_mid = usable[0].mid

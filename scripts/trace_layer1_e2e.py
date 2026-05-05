@@ -35,6 +35,7 @@ BOOTSTRAP_SERVER = os.getenv("KAFKA_BOOTSTRAP_SERVER", "localhost:29092")
 RAW_TOPIC = os.getenv("KAFKA_RAW_TOPIC", "market.ticks.raw")
 VALIDATED_TOPIC = os.getenv("KAFKA_VALIDATED_TOPIC", "market.ticks.validated")
 AUTO_OFFSET_RESET = os.getenv("KAFKA_AUTO_OFFSET_RESET", "latest")  # latest|earliest
+PRIMARY_EXCHANGE = os.getenv("PRIMARY_EXCHANGE", "binance")
 
 MAX_WINDOWS = int(os.getenv("TRACE_MAX_WINDOWS", "12"))
 MAX_SECONDS = float(os.getenv("TRACE_MAX_SECONDS", "15"))
@@ -85,9 +86,13 @@ def ensure_topics() -> None:
 
 
 def _median_latency_ms(ticks: List[NormalizedTick]) -> float:
-    latencies = [max(0, t.received_timestamp_ms - t.exchange_timestamp_ms) for t in ticks]
+    latencies = [
+        max(0, t.received_timestamp_ms - t.exchange_timestamp_ms)
+        for t in ticks
+        if getattr(t, "timestamp_source", "exchange") == "exchange"
+    ]
     if not latencies:
-        return 0.0
+        return float("inf")
     return float(statistics.median(latencies))
 
 
@@ -143,19 +148,26 @@ def _try_pop_validated_match(
     buffered: List[dict],
     *,
     symbol: str,
+    primary_exchange: str,
     mid_price: float,
+    consensus_mid: float,
     trust_score: float,
 ) -> Optional[dict]:
     for i, msg in enumerate(buffered):
         if not isinstance(msg, dict) or msg.get("symbol") != symbol:
             continue
+        if msg.get("primary_exchange") != primary_exchange:
+            continue
 
         m = msg.get("mid_price")
+        cm = msg.get("consensus_mid")
         ts = msg.get("trust_score")
-        if not isinstance(m, (int, float)) or not isinstance(ts, (int, float)):
+        if not isinstance(m, (int, float)) or not isinstance(cm, (int, float)) or not isinstance(ts, (int, float)):
             continue
 
         if _approx_equal(float(m), float(mid_price), rel=1e-8, abs_tol=1e-8) and _approx_equal(
+            float(cm), float(consensus_mid), rel=1e-8, abs_tol=1e-8
+        ) and _approx_equal(
             float(ts), float(trust_score), rel=1e-6, abs_tol=1e-6
         ):
             return buffered.pop(i)
@@ -296,7 +308,20 @@ def main() -> None:
                 if out.consensus_mid is None:
                     continue
 
-                usable_ticks = [t for ex, t in by_ex.items() if ex in out.used_sources]
+                primary_tick = by_ex.get(PRIMARY_EXCHANGE)
+                if primary_tick is None or PRIMARY_EXCHANGE not in out.used_sources:
+                    _print(
+                        "primary_skipped",
+                        {
+                            "symbol": symbol,
+                            "primary_exchange": PRIMARY_EXCHANGE,
+                            "used_sources": out.used_sources,
+                            "available_sources": sorted(by_ex.keys()),
+                        },
+                    )
+                    continue
+
+                usable_ticks = [primary_tick]
 
                 agreeing_sources = len(out.used_sources)
                 tolerance = abs(float(out.consensus_mid)) * float(consensus.config.divergence_tolerance)
@@ -340,13 +365,15 @@ def main() -> None:
                 )
 
                 # Try to show a corresponding validated tick that the real service published.
-                # Best-effort match by (symbol, mid_price, trust_score). If not found quickly,
-                # we still show the next tick for the symbol but label it as unmatched.
+                # Best-effort match by (symbol, primary_exchange, primary_mid_price, consensus_mid, trust_score).
+                # If not found quickly, we still show the next tick for the symbol but label it as unmatched.
                 deadline = time.time() + 1.5
                 validated_msg = _try_pop_validated_match(
                     buffered_validated,
                     symbol=symbol,
-                    mid_price=float(out.consensus_mid),
+                    primary_exchange=PRIMARY_EXCHANGE,
+                    mid_price=float(primary_tick.mid),
+                    consensus_mid=float(out.consensus_mid),
                     trust_score=float(trust_score),
                 )
                 while validated_msg is None and time.time() < deadline:
@@ -358,7 +385,9 @@ def main() -> None:
                     validated_msg = _try_pop_validated_match(
                         buffered_validated,
                         symbol=symbol,
-                        mid_price=float(out.consensus_mid),
+                        primary_exchange=PRIMARY_EXCHANGE,
+                        mid_price=float(primary_tick.mid),
+                        consensus_mid=float(out.consensus_mid),
                         trust_score=float(trust_score),
                     )
 
@@ -371,7 +400,12 @@ def main() -> None:
                             "validated_out_unmatched",
                             {
                                 "symbol": symbol,
-                                "expected": {"mid_price": float(out.consensus_mid), "trust_score": float(trust_score)},
+                                "expected": {
+                                    "primary_exchange": PRIMARY_EXCHANGE,
+                                    "mid_price": float(primary_tick.mid),
+                                    "consensus_mid": float(out.consensus_mid),
+                                    "trust_score": float(trust_score),
+                                },
                                 "validated": fallback,
                             },
                         )
@@ -380,7 +414,12 @@ def main() -> None:
                             "validated_out_missing",
                             {
                                 "symbol": symbol,
-                                "expected": {"mid_price": float(out.consensus_mid), "trust_score": float(trust_score)},
+                                "expected": {
+                                    "primary_exchange": PRIMARY_EXCHANGE,
+                                    "mid_price": float(primary_tick.mid),
+                                    "consensus_mid": float(out.consensus_mid),
+                                    "trust_score": float(trust_score),
+                                },
                             },
                         )
 
