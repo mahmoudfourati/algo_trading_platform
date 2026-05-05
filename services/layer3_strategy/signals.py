@@ -31,8 +31,8 @@ class SignalThresholds:
     bollinger_strong_pct: float = 0.01
     ema_cross_window: int = 3
     ema_cross_margin_pct: float = 0.001
-    ofi_long_threshold: float = 0.10
-    ofi_short_threshold: float = -0.10
+    ofi_long_threshold: float = 0.03
+    ofi_short_threshold: float = 0.03
     higher_long_rsi_max: float = 55.0
     higher_short_rsi_min: float = 45.0
 

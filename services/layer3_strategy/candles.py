@@ -68,7 +68,7 @@ class CandleAggregator:
         symbol: str,
         timeframe: str,
         reliability_trust_floor: float = 0.5,
-        reliability_anomaly_ceiling: float = 0.7,
+        reliability_anomaly_ceiling: float = 0.8,
         unreliable_streak_to_degrade: int = 50,
     ) -> None:
         if timeframe not in TIMEFRAME_TO_MS:
