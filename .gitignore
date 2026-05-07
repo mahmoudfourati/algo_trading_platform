@@ -1,6 +1,10 @@
+# Purpose: Ignore local envs/caches, runtime artifacts, IDE files, and secrets.
 .venv/
 __pycache__/
 *.pyc
+
+# Layer1 E2E test artifacts (generated)
+artifacts/reports/layer1_e2e_hash_chain*.jsonl
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

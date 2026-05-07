@@ -1,3 +1,8 @@
+"""Tests for Layer 1 consensus logic.
+
+Covers divergence tolerance, quarantine behavior, and consensus output selection.
+"""
+
 from __future__ import annotations
 
 import time

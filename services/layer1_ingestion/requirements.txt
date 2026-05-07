@@ -1,3 +1,4 @@
+# Purpose: Dependencies for the Layer 1 ingestion service.
 websockets==12.0
 httpx==0.27.2
 pydantic==2.9.2

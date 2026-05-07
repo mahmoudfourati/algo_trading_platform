@@ -1,3 +1,8 @@
+"""metrics-service FastAPI app.
+
+Exposes `/metrics` for Prometheus scraping and a small root endpoint for sanity checks.
+"""
+
 import os
 import time
 

@@ -1,3 +1,8 @@
+"""Layer 1 ingestion soak runner.
+
+Runs adapters for an extended duration and writes periodic health/status to logs.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,8 +11,10 @@ import time
 from pathlib import Path
 
 from .adapters.binance import BinanceAdapter
+from .adapters.bybit import BybitAdapter
 from .adapters.coinbase import CoinbaseAdapter
 from .adapters.kraken import KrakenAdapter
+from .adapters.okx import OkxAdapter
 
 
 def _parse_csv(value: str) -> list[str]:
@@ -69,6 +76,8 @@ async def main() -> None:
         BinanceAdapter(symbols),
         CoinbaseAdapter(symbols),
         KrakenAdapter(symbols),
+        OkxAdapter(symbols),
+        BybitAdapter(symbols),
     ]
 
     tick_counts: dict[str, int] = {a.exchange_id: 0 for a in adapters}

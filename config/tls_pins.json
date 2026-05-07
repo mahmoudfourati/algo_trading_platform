@@ -13,5 +13,15 @@
     "host": "ws.kraken.com",
     "port": 443,
     "sha256_fingerprint": "27850526f2c56fe0a199a247ffba0471192081d6a4b38c8933423e7f0b469256"
+  },
+  "okx": {
+    "host": "ws.okx.com",
+    "port": 8443,
+    "sha256_fingerprint": "0119160662ea97c430cd7b4a639436403c4c90f83575b70551fdfff16ae980c8"
+  },
+  "bybit": {
+    "host": "stream.bybit.com",
+    "port": 443,
+    "sha256_fingerprint": "ae1847dcbd3f729f4d34e9d95b3a7962e48785efc1c39d8baa62ce4771fdb7b6"
   }
 }

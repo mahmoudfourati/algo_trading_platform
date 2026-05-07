@@ -1,3 +1,8 @@
+"""Tests for TLS pinning helpers.
+
+Validates mismatch refusal and configuration parsing behavior.
+"""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,8 @@
+"""Raw tick Kafka publisher.
+
+Publishes NormalizedTick messages with a bounded outage buffer and topic auto-create.
+"""
+
 from __future__ import annotations
 
 import json
@@ -12,7 +17,7 @@ from kafka import KafkaAdminClient, KafkaProducer
 from kafka.admin import NewTopic
 
 from shared.audit import emit_audit_event
-from shared.schemas import NormalizedTick
+from shared.schemas import NormalizedTick, RawTick
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -82,7 +87,7 @@ class RawTickKafkaPublisher:
         self._close_producer()
 
     def publish(self, tick: NormalizedTick) -> None:
-        payload = self._serialize_tick(tick)
+        payload = self._serialize_tick(RawTick.model_validate(tick.model_dump()))
         try:
             self._queue.put_nowait(payload)
             return
@@ -123,7 +128,7 @@ class RawTickKafkaPublisher:
         )
 
     @staticmethod
-    def _serialize_tick(tick: NormalizedTick) -> bytes:
+    def _serialize_tick(tick: RawTick) -> bytes:
         # Canonical JSON: stable encoding for downstream hashing/audit.
         return json.dumps(tick.model_dump(), separators=(",", ":"), sort_keys=True).encode("utf-8")
 

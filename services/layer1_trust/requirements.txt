@@ -1,1 +1,2 @@
+# Purpose: Dependencies for the Layer 1 trust scoring module.
 pydantic==2.9.2

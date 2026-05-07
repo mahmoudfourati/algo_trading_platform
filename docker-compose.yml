@@ -1,3 +1,4 @@
+# Purpose: Local Docker Compose stack for Kafka + services + monitoring.
 name: algo-trading
 
 services:
@@ -62,8 +63,8 @@ services:
       KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
       PUBLISH_RAW_TO_KAFKA: "1"
       METRICS_PORT: "9101"
-      # Defaults are fine, but keep explicit for clarity.
-      EXCHANGES: "binance,coinbase,kraken"
+      # Use all configured exchanges by default.
+      EXCHANGES: "binance,bybit,coinbase,kraken,okx"
       SYMBOLS: "BTC-USDT,ETH-USDT"
     volumes:
       - ./config:/app/config:ro
@@ -83,10 +84,10 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
       METRICS_PORT: "9102"
-      EXCHANGES: "binance,coinbase,kraken"
+      EXCHANGES: "binance,bybit,coinbase,kraken,okx"
       KAFKA_RAW_TOPIC: "market.ticks.raw"
       KAFKA_VALIDATED_TOPIC: "market.ticks.validated"
-      KAFKA_AUTO_OFFSET_RESET: "latest"
+      KAFKA_AUTO_OFFSET_RESET: "earliest"
       HASH_CHAIN_LOG_PATH: "/app/logs/layer1_hash_chain.jsonl"
     volumes:
       - ./config:/app/config:ro
@@ -108,7 +109,7 @@ services:
       METRICS_PORT: "9103"
       KAFKA_VALIDATED_TOPIC: "market.ticks.validated"
       KAFKA_SCORED_TOPIC: "market.ticks.scored"
-      KAFKA_AUTO_OFFSET_RESET: "latest"
+      KAFKA_AUTO_OFFSET_RESET: "earliest"
       HMM_MODEL_PATH: "/app/artifacts/hmm/model.pkl"
     volumes:
       - ./config:/app/config:ro
@@ -116,6 +117,68 @@ services:
       - ./artifacts:/app/artifacts
     ports:
       - "9103:9103"
+    networks:
+      - trading-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  layer3-strategy:
+    build:
+      context: .
+      dockerfile: ./services/layer3_strategy/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
+      METRICS_PORT: "9104"
+      KAFKA_SCORED_TOPIC: "market.ticks.scored"
+      KAFKA_SIGNALS_TOPIC: "trading.signals"
+      KAFKA_AUTO_OFFSET_RESET: "earliest"
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "9104:9104"
+    networks:
+      - trading-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  layer4-risk:
+    build:
+      context: .
+      dockerfile: ./services/layer4_risk/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
+      METRICS_PORT: "9105"
+      KAFKA_SIGNALS_TOPIC: "trading.signals"
+      KAFKA_APPROVED_TOPIC: "trading.orders.approved"
+      KAFKA_AUTO_OFFSET_RESET: "earliest"
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "9105:9105"
+    networks:
+      - trading-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  layer5-execution:
+    build:
+      context: .
+      dockerfile: ./services/layer5_execution/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
+      METRICS_PORT: "9106"
+      KAFKA_APPROVED_TOPIC: "trading.orders.approved"
+      KAFKA_EXECUTED_TOPIC: "trading.orders.executed"
+      KAFKA_AUTO_OFFSET_RESET: "earliest"
+      EXECUTION_PERSISTENCE_DB: "/app/logs/execution_orders.db"
+      PORTFOLIO_VALUE: "1.0"
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "9106:9106"
     networks:
       - trading-net
     depends_on:
@@ -137,6 +200,9 @@ services:
       - layer1-ingestion
       - layer1-validated
       - layer2-anomaly
+      - layer3-strategy
+      - layer4-risk
+      - layer5-execution
 
   grafana:
     image: grafana/grafana:11.2.0

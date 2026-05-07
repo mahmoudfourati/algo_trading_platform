@@ -1,3 +1,8 @@
+"""Layer 1 validated service.
+
+Consumes raw ticks, aligns windows, runs consensus + trust scoring, and publishes ValidatedTick.
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,17 +11,19 @@ import statistics
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple, cast
 
 from kafka import KafkaConsumer
 from prometheus_client import Counter, Gauge
 
-from services.layer1_consensus.engine import ConsensusConfig, ConsensusEngine, TickAligner
+from services.layer1_consensus.engine import AlignedWindow, ConsensusConfig, ConsensusEngine, TickAligner
 from services.layer1_hashlog.hash_chain import HashChainLogger
-from services.layer1_trust.scoring import TrustWeights, compute_subscores, compute_trust_score, load_trust_weights
+from services.layer1_trust.scoring import TrustWeights, compute_subscores, compute_t2, compute_trust_score, load_trust_weights
 from shared.audit import emit_audit_event
 from shared.metrics_http import start_metrics_http_server
 from shared.schemas import ExchangeId, NormalizedTick, ValidatedTick
+
+from .liveness import ExchangeLivenessMonitor
 
 from .kafka_json_publisher import KafkaJsonPublisher, KafkaJsonPublisherConfig
 
@@ -43,6 +50,12 @@ _published_total = Counter(
     ["symbol"],
 )
 
+_primary_source_skipped_total = Counter(
+    "layer1_validated_primary_source_skipped_total",
+    "Total aligned windows skipped because the configured primary exchange was unavailable or excluded.",
+    ["symbol"],
+)
+
 _last_trust_score = Gauge(
     "layer1_validated_last_trust_score",
     "Most recent computed trust score (last window).",
@@ -55,15 +68,41 @@ def _parse_csv(value: str) -> list[str]:
 
 
 def _enabled_exchanges() -> list[ExchangeId]:
-    raw = os.getenv("EXCHANGES", "binance,coinbase,kraken")
+    raw = os.getenv("EXCHANGES", "binance,bybit,coinbase,kraken,okx")
     xs = _parse_csv(raw)
-    return [x for x in xs if x in {"binance", "coinbase", "kraken"}]  # type: ignore[return-value]
+    return [x for x in xs if x in {"binance", "coinbase", "kraken", "okx", "bybit"}]  # type: ignore[return-value]
 
 
-def _median_latency_ms(ticks: Iterable[NormalizedTick]) -> float:
-    latencies = [max(0, t.received_timestamp_ms - t.exchange_timestamp_ms) for t in ticks]
+def _primary_exchange(enabled_exchanges: list[ExchangeId]) -> ExchangeId:
+    configured = os.getenv("PRIMARY_EXCHANGE", "binance")
+    if configured in enabled_exchanges:
+        return cast(ExchangeId, configured)
+
+    if not enabled_exchanges:
+        raise RuntimeError("No enabled exchanges configured")
+
+    emit_audit_event(
+        "layer1.validated.primary_exchange.fallback",
+        source="layer1_validated",
+        payload={
+            "configured": configured,
+            "fallback": enabled_exchanges[0],
+            "enabled_exchanges": enabled_exchanges,
+        },
+    )
+    return enabled_exchanges[0]
+
+
+def _median_latency_ms(ticks: Iterable[NormalizedTick], *, now_ms: int) -> float:
+    # Only use ticks with a trustworthy exchange timestamp.
+    # Receive-time-only feeds are excluded so they do not masquerade as source-time freshness.
+    latencies = [
+        max(0, int(now_ms) - int(t.exchange_timestamp_ms))
+        for t in ticks
+        if getattr(t, "timestamp_source", "exchange") == "exchange"
+    ]
     if not latencies:
-        return 0.0
+        return float("inf")
     return float(statistics.median(latencies))
 
 
@@ -95,6 +134,60 @@ class Layer1ValidatedService:
     weights: TrustWeights
     hashlog: HashChainLogger
     enabled_exchanges: List[ExchangeId]
+    primary_exchange: ExchangeId
+    liveness: ExchangeLivenessMonitor
+    _last_sequence_ids: Dict[Tuple[str, ExchangeId], int]
+    _last_liveness_overdue: Dict[str, float]
+    _last_liveness_check_s: float
+
+    def _compute_sequence_gap(
+        self,
+        *,
+        symbol: str,
+        exchange: ExchangeId,
+        sequence_id: Optional[int],
+    ) -> Optional[int]:
+        if sequence_id is None:
+            return None
+
+        key = (symbol, exchange)
+        current = int(sequence_id)
+        previous = self._last_sequence_ids.get(key)
+        if previous is None:
+            self._last_sequence_ids[key] = current
+            return 1
+
+        gap = current - previous
+        if gap <= 0:
+            emit_audit_event(
+                "layer1.validated.sequence.non_monotonic",
+                source="layer1_validated",
+                payload={
+                    "symbol": symbol,
+                    "exchange_id": exchange,
+                    "previous_sequence_id": previous,
+                    "current_sequence_id": current,
+                    "computed_gap": gap,
+                },
+            )
+            # Keep the larger previously-seen sequence id to avoid masking replays.
+            self._last_sequence_ids[key] = max(previous, current)
+            return 10
+
+        self._last_sequence_ids[key] = current
+        if gap > 1:
+            emit_audit_event(
+                "layer1.validated.sequence.gap",
+                source="layer1_validated",
+                payload={
+                    "symbol": symbol,
+                    "exchange_id": exchange,
+                    "previous_sequence_id": previous,
+                    "current_sequence_id": current,
+                    "computed_gap": gap,
+                },
+            )
+        return gap
 
     def run_forever(self) -> None:
         emit_audit_event(
@@ -119,41 +212,72 @@ class Layer1ValidatedService:
 
                 _raw_ticks_total.inc()
 
-                for symbol, by_ex in self.aligner.add(tick):
-                    self._process_window(symbol, by_ex)
+                self.liveness.record_tick(tick.exchange_id)
+                now_s = time.time()
+                if now_s - self._last_liveness_check_s >= 1.0:
+                    self._last_liveness_overdue = self.liveness.check_all()
+                    self._last_liveness_check_s = now_s
+
+                for window in self.aligner.add(tick):
+                    self._process_window(window)
         finally:
             self.hashlog.stop()
             self.publisher.stop()
             self.consumer.close()
 
-    def _process_window(self, symbol: str, by_ex: Dict[ExchangeId, NormalizedTick]) -> None:
+    def _process_window(self, window: AlignedWindow) -> None:
+        symbol = window.symbol
+        by_ex = window.by_ex
+
         _windows_total.labels(symbol=symbol).inc()
         out = self.consensus.process_aligned(symbol, by_ex)
         if out.consensus_mid is None:
             return
 
-        usable_ticks = [t for ex, t in by_ex.items() if ex in out.used_sources]
+        primary_tick = by_ex.get(self.primary_exchange)
+        if primary_tick is None or self.primary_exchange not in out.used_sources:
+            _primary_source_skipped_total.labels(symbol=symbol).inc()
+            emit_audit_event(
+                "layer1.validated.primary_source_skipped",
+                source="layer1_validated",
+                payload={
+                    "symbol": symbol,
+                    "primary_exchange": self.primary_exchange,
+                    "used_sources": out.used_sources,
+                    "available_sources": sorted(str(ex) for ex in by_ex.keys()),
+                },
+            )
+            return
 
-        total_sources = max(1, len(self.enabled_exchanges))
-        agreeing_sources = len(out.used_sources)
+        usable_ticks = [primary_tick]
 
-        latency_ms = _median_latency_ms(usable_ticks)
+        tolerance = abs(out.consensus_mid) * float(self.consensus.config.divergence_tolerance)
+        t2 = compute_t2(
+            ticks_with_age=window.ticks_with_age,
+            consensus_price=out.consensus_mid,
+            tolerance=tolerance,
+            active_sources=window.active_sources,
+        )
+
+        latency_ms = _median_latency_ms(usable_ticks, now_ms=window.window_end_ms)
         spread = _median_spread(usable_ticks)
         volume_24h = _median_volume_24h(usable_ticks)
 
         # Phase 2.2 pinning refuses mismatched connections, so ticks imply TLS OK.
         tls_ok = True
 
-        # Sequence gaps are not yet fully supported across all exchanges; treat missing as no penalty.
-        sequence_gap = None
+        sequence_gap = self._compute_sequence_gap(
+            symbol=symbol,
+            exchange=self.primary_exchange,
+            sequence_id=primary_tick.sequence_id,
+        )
 
         previous_hash = self.hashlog.tip
         chain_ok = True  # previous_hash is taken from current tip.
 
         subscores = compute_subscores(
             tls_ok=tls_ok,
-            agreeing_sources=agreeing_sources,
-            total_sources=total_sources,
+            t2=t2,
             latency_ms=latency_ms,
             sequence_gap=sequence_gap,
             chain_ok=chain_ok,
@@ -163,22 +287,30 @@ class Layer1ValidatedService:
 
         tick_hash, _ = self.hashlog.append(
             symbol=symbol,
+            primary_exchange=self.primary_exchange,
+            primary_mid_price=primary_tick.mid,
             consensus_mid=out.consensus_mid,
+            used_sources=out.used_sources,
+            divergent_sources=out.divergent_sources,
             trust_score=trust_score,
-            received_timestamp_ms=int(time.time() * 1000),
+            received_timestamp_ms=window.window_end_ms,
             previous_hash=previous_hash,
         )
 
         validated = ValidatedTick(
             symbol=symbol,
-            mid_price=out.consensus_mid,
+            primary_exchange=self.primary_exchange,
+            mid_price=primary_tick.mid,
+            consensus_mid=out.consensus_mid,
             volume_24h=volume_24h,
             spread=spread,
             trust_score=trust_score,
             sub_scores=subscores,
-            divergent_sources=out.quarantined_sources,
-            timestamp_utc=int(time.time() * 1000),
+            used_sources=out.used_sources,
+            divergent_sources=out.divergent_sources,
+            timestamp_utc=window.window_end_ms,
             tick_hash=tick_hash,
+            liveness=self._last_liveness_overdue or None,
         )
 
         self.publisher.publish(validated.model_dump())
@@ -187,17 +319,18 @@ class Layer1ValidatedService:
 
 def build_service() -> Layer1ValidatedService:
     enabled_exchanges = _enabled_exchanges()
+    primary_exchange = _primary_exchange(enabled_exchanges)
     bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVER", "localhost:29092")
     raw_topic = os.getenv("KAFKA_RAW_TOPIC", "market.ticks.raw")
 
-    group_id = os.getenv("KAFKA_GROUP_ID", f"layer1-validated-{int(time.time())}")
+    group_id = os.getenv("KAFKA_GROUP_ID", "layer1-validated")
 
     consumer = KafkaConsumer(
         raw_topic,
         bootstrap_servers=bootstrap,
         group_id=group_id,
         enable_auto_commit=True,
-        auto_offset_reset=os.getenv("KAFKA_AUTO_OFFSET_RESET", "latest"),
+        auto_offset_reset=os.getenv("KAFKA_AUTO_OFFSET_RESET", "earliest"),
     )
 
     pub_cfg = KafkaJsonPublisherConfig.from_env(topic_env="KAFKA_VALIDATED_TOPIC", default_topic="market.ticks.validated")
@@ -220,6 +353,14 @@ def build_service() -> Layer1ValidatedService:
     hashlog = HashChainLogger(path=log_path)
     hashlog.start()
 
+    def _audit(event_type: str, payload: Dict) -> None:
+        emit_audit_event(event_type, source="layer1_validated", payload=payload)
+
+    liveness = ExchangeLivenessMonitor(
+        sources=[str(x) for x in enabled_exchanges],
+        audit_fn=_audit,
+    )
+
     return Layer1ValidatedService(
         consumer=consumer,
         publisher=publisher,
@@ -228,6 +369,11 @@ def build_service() -> Layer1ValidatedService:
         weights=weights,
         hashlog=hashlog,
         enabled_exchanges=enabled_exchanges,
+        primary_exchange=primary_exchange,
+        liveness=liveness,
+        _last_sequence_ids={},
+        _last_liveness_overdue={},
+        _last_liveness_check_s=0.0,
     )
 
 

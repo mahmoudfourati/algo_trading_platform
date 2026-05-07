@@ -1,3 +1,4 @@
+# Purpose: Image for Layer 1 ingestion (WS adapters -> NormalizedTick -> Kafka raw topic).
 FROM python:3.11-slim
 
 WORKDIR /app

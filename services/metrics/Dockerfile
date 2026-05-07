@@ -1,3 +1,4 @@
+# Purpose: Image for metrics-service (FastAPI app exposing /metrics).
 FROM python:3.11-slim
 
 WORKDIR /app

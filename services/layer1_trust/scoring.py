@@ -1,3 +1,8 @@
+"""Layer 1 trust scoring.
+
+Computes subscores (T1..T5) and aggregates them into a weighted trust score in [0,1].
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,9 +11,13 @@ import os
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+from shared.schemas import ExchangeId, NormalizedTick
+
 
 HALF_LIFE_MS = 25.0
 LAMBDA = math.log(2.0) / HALF_LIFE_MS
+
+T2_HALF_LIFE_MS = 7_500.0
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,33 @@ def t2_consensus_agreement(*, agreeing_sources: int, total_sources: int) -> floa
         return 0.0
     agreeing = max(0, min(int(agreeing_sources), int(total_sources)))
     return float(agreeing) / float(total_sources)
+
+
+def compute_t2(
+    *,
+    ticks_with_age: list[tuple[NormalizedTick, float]],
+    consensus_price: float,
+    tolerance: float,
+    active_sources: set[ExchangeId],
+) -> float:
+    """Freshness-weighted source agreement score.
+
+    Each source contributes a weight = exp(-age_ms / T2_HALF_LIFE_MS * ln2).
+    Only sources in `active_sources` are included.
+    """
+
+    weighted_agreement = 0.0
+    total_weight = 0.0
+
+    for tick, age_ms in ticks_with_age:
+        if tick.exchange_id not in active_sources:
+            continue
+        weight = math.exp(-float(age_ms) / float(T2_HALF_LIFE_MS) * math.log(2.0))
+        agrees = 1.0 if abs(tick.mid - float(consensus_price)) <= float(tolerance) else 0.0
+        weighted_agreement += weight * agrees
+        total_weight += weight
+
+    return weighted_agreement / total_weight if total_weight > 0 else 0.0
 
 
 def t3_latency_freshness(*, latency_ms: float) -> float:
@@ -109,15 +145,14 @@ def compute_trust_score(*, weights: TrustWeights, subscores: Dict[str, float]) -
 def compute_subscores(
     *,
     tls_ok: bool,
-    agreeing_sources: int,
-    total_sources: int,
+    t2: float,
     latency_ms: float,
     sequence_gap: Optional[int],
     chain_ok: bool,
 ) -> Dict[str, float]:
     return {
         "T1": t1_tls_validity(tls_ok=tls_ok),
-        "T2": t2_consensus_agreement(agreeing_sources=agreeing_sources, total_sources=total_sources),
+        "T2": max(0.0, min(1.0, float(t2))),
         "T3": t3_latency_freshness(latency_ms=latency_ms),
         "T4": t4_sequence_integrity(gap=sequence_gap),
         "T5": t5_hash_chain_continuity(chain_ok=chain_ok),

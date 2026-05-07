@@ -1,3 +1,4 @@
+# Purpose: Prometheus scrape config for all services exposing /metrics.
 global:
   scrape_interval: 5s
   evaluation_interval: 5s

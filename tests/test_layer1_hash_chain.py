@@ -1,3 +1,8 @@
+"""Tests for Layer 1 hash-chain logging.
+
+Ensures corruption is detected and chain continuity rules hold.
+"""
+
 from __future__ import annotations
 
 import json

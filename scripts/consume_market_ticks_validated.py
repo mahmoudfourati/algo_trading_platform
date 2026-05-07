@@ -1,3 +1,8 @@
+"""Debug consumer for validated ticks.
+
+Reads Kafka topic `market.ticks.validated` and prints each message as JSON.
+"""
+
 import json
 import os
 import time

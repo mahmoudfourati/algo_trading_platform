@@ -1,3 +1,8 @@
+"""Kraken WebSocket adapter.
+
+Connects to Kraken feed and normalizes ticker messages into NormalizedTick.
+"""
+
 from __future__ import annotations
 
 import json
@@ -89,6 +94,9 @@ class KrakenAdapter(BaseWsAdapter):
 
         # Pair example: "XBT/USDT" -> "BTC-USDT"
         norm_pair = str(pair).upper().replace("XBT", "BTC").replace("/", "-")
+        # Kraken ticker payload does not expose a trustworthy exchange timestamp.
+        # Preserve the receive timestamp explicitly so downstream freshness logic
+        # does not pretend to have source-time precision it does not actually have.
         return NormalizedTick(
             exchange_id="kraken",
             symbol=norm_pair,
@@ -98,5 +106,6 @@ class KrakenAdapter(BaseWsAdapter):
             volume_24h=vol_24h,
             exchange_timestamp_ms=received_timestamp_ms,
             received_timestamp_ms=received_timestamp_ms,
+            timestamp_source="receive",
             sequence_id=None,
         )

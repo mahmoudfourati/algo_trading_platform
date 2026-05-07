@@ -1,3 +1,4 @@
+# Purpose: Dependencies for the Layer 2 anomaly service.
 kafka-python==2.0.2
 pydantic==2.9.2
 prometheus-client==0.21.0

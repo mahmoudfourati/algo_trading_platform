@@ -1,3 +1,4 @@
+# Purpose: Grafana provisioning for the Prometheus datasource.
 apiVersion: 1
 
 datasources:

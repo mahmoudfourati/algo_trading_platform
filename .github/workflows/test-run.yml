@@ -1,0 +1,28 @@
+name: Backtest smoke
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  backtest-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install -r requirements-dev.txt
+      - name: Run quick backtest smoke
+        run: |
+          bash scripts/run_backtest.sh BTCUSDT 2026-04-01 2026-04-01 artifacts/test_runs artifacts/hmm/model.pkl 42
+      - name: Upload artifacts (if present)
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-artifacts
+          path: artifacts/test_runs

@@ -1,3 +1,8 @@
+"""Debug consumer for scored ticks.
+
+Reads Kafka topic `market.ticks.scored` and prints each message as JSON.
+"""
+
 import json
 import os
 import time

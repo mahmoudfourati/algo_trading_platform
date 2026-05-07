@@ -1,3 +1,4 @@
+# Purpose: Dependencies for the metrics-service FastAPI app.
 fastapi==0.115.2
 uvicorn[standard]==0.32.0
 prometheus-client==0.21.0

@@ -1,3 +1,8 @@
+"""Tests for Layer 1 exchange adapters.
+
+Validates message parsing and normalization into the shared tick schema.
+"""
+
 from services.layer1_ingestion.adapters.binance import BinanceAdapter
 from services.layer1_ingestion.adapters.coinbase import CoinbaseAdapter
 from services.layer1_ingestion.adapters.kraken import KrakenAdapter

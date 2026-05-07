@@ -1,3 +1,8 @@
+"""Coinbase WebSocket adapter.
+
+Connects to Coinbase feed and normalizes ticker messages into NormalizedTick.
+"""
+
 from __future__ import annotations
 
 import json

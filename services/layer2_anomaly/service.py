@@ -1,9 +1,14 @@
+"""Layer 2 anomaly service.
+
+Consumes ValidatedTick, emits anomaly/system state, and publishes ScoredTick.
+"""
+
 from __future__ import annotations
 
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from kafka import KafkaConsumer
@@ -36,6 +41,95 @@ class Layer2Service:
     publisher: KafkaJsonPublisher
     engine_by_symbol: dict[str, Layer2ScoringEngine]
     gate: DecisionGate
+    missing_data_timeout_s: float = 30.0
+    _last_valid_tick_s: float = field(default_factory=time.monotonic, init=False, repr=False)
+    _watchdog_in_halt: bool = field(default=False, init=False, repr=False)
+
+    def _enter_watchdog_halt(self, *, now_s: float) -> None:
+        if self._watchdog_in_halt:
+            return
+
+        previous_state = self.gate.state
+        self._watchdog_in_halt = True
+        self.gate.update(trust=0.0, anomaly=1.0)
+        _last_state.set(_STATE_NUM.get(self.gate.state, 3.0))
+        if previous_state != "HALT":
+            emit_audit_event(
+                "layer2.watchdog.timeout",
+                source="layer2_anomaly",
+                payload={
+                    "timeout_s": self.missing_data_timeout_s,
+                    "last_valid_tick_s": self._last_valid_tick_s,
+                    "triggered_at_s": now_s,
+                },
+            )
+
+    def _maybe_clear_watchdog(self, *, prev_state: str) -> None:
+        if self._watchdog_in_halt and self.gate.state != "HALT":
+            emit_audit_event(
+                "layer2.watchdog.recovered",
+                source="layer2_anomaly",
+                payload={"previous_state": prev_state, "current_state": self.gate.state},
+            )
+            self._watchdog_in_halt = False
+
+    def _process_validated_tick(self, tick: ValidatedTick) -> None:
+        scorer = self.engine_by_symbol.get(tick.symbol)
+        if scorer is None:
+            scorer = Layer2ScoringEngine(
+                hmm_model_path=os.getenv("HMM_MODEL_PATH", os.path.join("artifacts", "hmm", "model.pkl")),
+                if_weight=float(os.getenv("L2_IF_WEIGHT", "0.45")),
+                hst_weight=float(os.getenv("L2_HST_WEIGHT", "0.55")),
+                mad_floor=float(os.getenv("L2_MAD_FLOOR", "0.65")),
+            )
+            self.engine_by_symbol[tick.symbol] = scorer
+
+        scores = scorer.score_tick(
+            symbol=tick.symbol,
+            ts_ms=int(tick.timestamp_utc),
+            mid_price=float(tick.mid_price),
+            trust_score=float(tick.trust_score),
+            volume_24h=tick.volume_24h,
+            spread=tick.spread,
+        )
+
+        prev_state = self.gate.state
+        system_state = self.gate.update(trust=float(tick.trust_score), anomaly=float(scores.anomaly_score))
+        _last_state.set(_STATE_NUM.get(system_state, 0.0))
+        _last_anomaly.labels(symbol=tick.symbol).set(float(scores.anomaly_score))
+
+        out = ScoredTick(
+            symbol=tick.symbol,
+            asset_class=tick.asset_class,
+            primary_exchange=tick.primary_exchange,
+            mid_price=tick.mid_price,
+            consensus_mid=tick.consensus_mid,
+            volume_24h=tick.volume_24h,
+            spread=tick.spread,
+            trust_score=tick.trust_score,
+            sub_scores=tick.sub_scores,
+            used_sources=tick.used_sources,
+            divergent_sources=tick.divergent_sources,
+            timestamp_utc=tick.timestamp_utc,
+            tick_hash=tick.tick_hash,
+            anomaly_score=float(scores.anomaly_score),
+            if_score=float(scores.if_score),
+            hst_score=float(scores.hst_score),
+            regime=int(scores.regime),
+            regime_posterior=list(scores.regime_posterior),
+            system_state=system_state,  # type: ignore[arg-type]
+            mad_guard_triggered=bool(scores.mad_guard_triggered),
+        )
+
+        self.publisher.publish(out.model_dump())
+        _scored_out_total.inc()
+        self._last_valid_tick_s = time.monotonic()
+        self._maybe_clear_watchdog(prev_state=prev_state)
+
+    def _check_watchdog(self, *, now_s: Optional[float] = None) -> None:
+        current = time.monotonic() if now_s is None else now_s
+        if (current - self._last_valid_tick_s) >= self.missing_data_timeout_s:
+            self._enter_watchdog_halt(now_s=current)
 
     def run_forever(self) -> None:
         emit_audit_event(
@@ -48,65 +142,29 @@ class Layer2Service:
         )
 
         try:
-            for msg in self.consumer:
-                _raw_in_total.inc()
-                try:
-                    raw = json.loads(msg.value.decode("utf-8"))
-                    tick = ValidatedTick.model_validate(raw)
-                except Exception as e:
-                    _bad_in_total.inc()
-                    emit_audit_event(
-                        "layer2.bad_validated_tick",
-                        source="layer2_anomaly",
-                        payload={"error": repr(e)},
-                    )
+            while True:
+                records = self.consumer.poll(timeout_ms=1000, max_records=10)
+                if not records:
+                    self._check_watchdog()
                     continue
 
-                scorer = self.engine_by_symbol.get(tick.symbol)
-                if scorer is None:
-                    scorer = Layer2ScoringEngine(
-                        hmm_model_path=os.getenv("HMM_MODEL_PATH", os.path.join("artifacts", "hmm", "model.pkl")),
-                        if_weight=float(os.getenv("L2_IF_WEIGHT", "0.45")),
-                        hst_weight=float(os.getenv("L2_HST_WEIGHT", "0.55")),
-                        mad_floor=float(os.getenv("L2_MAD_FLOOR", "0.65")),
-                    )
-                    self.engine_by_symbol[tick.symbol] = scorer
+                for _tp, messages in records.items():
+                    for msg in messages:
+                        _raw_in_total.inc()
+                        try:
+                            raw = json.loads(msg.value.decode("utf-8"))
+                            tick = ValidatedTick.model_validate(raw)
+                        except Exception as e:
+                            _bad_in_total.inc()
+                            emit_audit_event(
+                                "layer2.bad_validated_tick",
+                                source="layer2_anomaly",
+                                payload={"error": repr(e)},
+                            )
+                            continue
 
-                scores = scorer.score_tick(
-                    symbol=tick.symbol,
-                    ts_ms=int(tick.timestamp_utc),
-                    mid_price=float(tick.mid_price),
-                    trust_score=float(tick.trust_score),
-                    volume_24h=tick.volume_24h,
-                    spread=tick.spread,
-                )
-
-                system_state = self.gate.update(trust=float(tick.trust_score), anomaly=float(scores.anomaly_score))
-                _last_state.set(_STATE_NUM.get(system_state, 0.0))
-                _last_anomaly.labels(symbol=tick.symbol).set(float(scores.anomaly_score))
-
-                out = ScoredTick(
-                    symbol=tick.symbol,
-                    asset_class=tick.asset_class,
-                    mid_price=tick.mid_price,
-                    volume_24h=tick.volume_24h,
-                    spread=tick.spread,
-                    trust_score=tick.trust_score,
-                    sub_scores=tick.sub_scores,
-                    divergent_sources=tick.divergent_sources,
-                    timestamp_utc=tick.timestamp_utc,
-                    tick_hash=tick.tick_hash,
-                    anomaly_score=float(scores.anomaly_score),
-                    if_score=float(scores.if_score),
-                    hst_score=float(scores.hst_score),
-                    regime=int(scores.regime),
-                    regime_posterior=list(scores.regime_posterior),
-                    system_state=system_state,  # type: ignore[arg-type]
-                    mad_guard_triggered=bool(scores.mad_guard_triggered),
-                )
-
-                self.publisher.publish(out.model_dump())
-                _scored_out_total.inc()
+                        self._process_validated_tick(tick)
+                        self._check_watchdog(now_s=time.monotonic())
         finally:
             self.publisher.stop()
             self.consumer.close()
@@ -125,7 +183,7 @@ def build_service() -> Layer2Service:
         bootstrap_servers=bootstrap,
         group_id=group_id,
         enable_auto_commit=True,
-        auto_offset_reset=os.getenv("KAFKA_AUTO_OFFSET_RESET", "latest"),
+        auto_offset_reset=os.getenv("KAFKA_AUTO_OFFSET_RESET", "earliest"),
     )
 
     pub_cfg = KafkaJsonPublisherConfig.from_env(topic_env="KAFKA_SCORED_TOPIC", default_topic="market.ticks.scored")
@@ -134,7 +192,7 @@ def build_service() -> Layer2Service:
 
     gate = DecisionGate(
         trust_threshold=float(os.getenv("L2_TRUST_THRESHOLD", "0.60")),
-        anomaly_threshold=float(os.getenv("L2_ANOMALY_THRESHOLD", "0.55")),
+        anomaly_threshold=float(os.getenv("L2_ANOMALY_THRESHOLD", "0.80")),
         upgrade_streak_required=int(os.getenv("L2_UPGRADE_STREAK", "10")),
     )
 

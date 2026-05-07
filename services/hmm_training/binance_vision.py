@@ -1,3 +1,8 @@
+"""Binance Vision downloader.
+
+Fetches daily kline zip files and parses them into a lightweight kline row stream.
+"""
+
 from __future__ import annotations
 
 import csv

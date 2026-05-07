@@ -1,3 +1,8 @@
+"""Kafka connectivity smoke test.
+
+Creates a topic (if needed), produces messages, and verifies consumption semantics.
+"""
+
 import json
 import os
 import threading

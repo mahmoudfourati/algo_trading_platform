@@ -1,3 +1,8 @@
+"""Buffered Kafka JSON publisher.
+
+Used by services to publish JSON payloads with bounded outage buffering.
+"""
+
 from __future__ import annotations
 
 import json
