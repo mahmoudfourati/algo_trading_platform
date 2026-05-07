@@ -62,6 +62,24 @@ _last_trust_score = Gauge(
     ["symbol"],
 )
 
+_last_window_sources = Gauge(
+    "layer1_validated_last_window_sources",
+    "Number of aligned exchange sources observed in the last processed window.",
+    ["symbol"],
+)
+
+_last_window_used_sources = Gauge(
+    "layer1_validated_last_window_used_sources",
+    "Number of exchange sources used in consensus in the last processed window.",
+    ["symbol"],
+)
+
+_last_window_latency_ms = Gauge(
+    "layer1_validated_last_window_latency_ms",
+    "Latency from exchange timestamp to Layer1 validated publish time (median across usable ticks).",
+    ["symbol"],
+)
+
 
 def _parse_csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
@@ -230,6 +248,7 @@ class Layer1ValidatedService:
         by_ex = window.by_ex
 
         _windows_total.labels(symbol=symbol).inc()
+        _last_window_sources.labels(symbol=symbol).set(float(len(by_ex)))
         out = self.consensus.process_aligned(symbol, by_ex)
         if out.consensus_mid is None:
             return
@@ -251,6 +270,9 @@ class Layer1ValidatedService:
 
         usable_ticks = [primary_tick]
 
+        agreeing_sources = len(out.used_sources)
+        _last_window_used_sources.labels(symbol=symbol).set(float(agreeing_sources))
+
         tolerance = abs(out.consensus_mid) * float(self.consensus.config.divergence_tolerance)
         t2 = compute_t2(
             ticks_with_age=window.ticks_with_age,
@@ -260,6 +282,7 @@ class Layer1ValidatedService:
         )
 
         latency_ms = _median_latency_ms(usable_ticks, now_ms=window.window_end_ms)
+        _last_window_latency_ms.labels(symbol=symbol).set(latency_ms)
         spread = _median_spread(usable_ticks)
         volume_24h = _median_volume_24h(usable_ticks)
 

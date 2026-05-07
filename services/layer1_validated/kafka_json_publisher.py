@@ -15,8 +15,40 @@ from typing import Optional
 
 from kafka import KafkaAdminClient, KafkaProducer
 from kafka.admin import NewTopic
+from prometheus_client import Counter, Gauge
 
 from shared.audit import emit_audit_event
+
+
+_json_pub_enqueued_total = Counter(
+    "kafka_json_publisher_enqueued_total",
+    "Messages enqueued to a buffered Kafka JSON publisher.",
+    ["client_id", "topic"],
+)
+
+_json_pub_sent_total = Counter(
+    "kafka_json_publisher_sent_total",
+    "Messages successfully sent by buffered Kafka JSON publisher.",
+    ["client_id", "topic"],
+)
+
+_json_pub_dropped_total = Counter(
+    "kafka_json_publisher_dropped_total",
+    "Messages dropped by buffered Kafka JSON publisher due to full queue.",
+    ["client_id", "topic", "reason"],
+)
+
+_json_pub_errors_total = Counter(
+    "kafka_json_publisher_errors_total",
+    "Kafka publish errors from buffered Kafka JSON publisher.",
+    ["client_id", "topic"],
+)
+
+_json_pub_queue_depth = Gauge(
+    "kafka_json_publisher_queue_depth",
+    "Current queue depth of buffered Kafka JSON publisher.",
+    ["client_id", "topic"],
+)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -80,9 +112,12 @@ class KafkaJsonPublisher:
 
     def publish(self, obj: dict) -> None:
         payload = json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        labels = dict(client_id=self._client_id, topic=self._config.topic)
 
         try:
             self._queue.put_nowait(payload)
+            _json_pub_enqueued_total.labels(**labels).inc()
+            _json_pub_queue_depth.labels(**labels).set(self._queue.qsize())
             return
         except queue.Full:
             pass
@@ -97,6 +132,8 @@ class KafkaJsonPublisher:
             self._queue.put_nowait(payload)
         except queue.Full:
             self._dropped_total += 1
+            _json_pub_dropped_total.labels(**labels, reason="drop_new").inc()
+            _json_pub_queue_depth.labels(**labels).set(self._queue.qsize())
             emit_audit_event(
                 "kafka.outage_buffer.drop",
                 source=self._client_id,
@@ -109,6 +146,8 @@ class KafkaJsonPublisher:
             return
 
         self._dropped_total += 1
+        _json_pub_dropped_total.labels(**labels, reason="drop_oldest").inc()
+        _json_pub_queue_depth.labels(**labels).set(self._queue.qsize())
         emit_audit_event(
             "kafka.outage_buffer.drop",
             source=self._client_id,
@@ -179,6 +218,7 @@ class KafkaJsonPublisher:
             if retry_payload is None:
                 try:
                     payload = self._queue.get(timeout=0.2)
+                    _json_pub_queue_depth.labels(client_id=self._client_id, topic=self._config.topic).set(self._queue.qsize())
                 except queue.Empty:
                     continue
             else:
@@ -192,10 +232,12 @@ class KafkaJsonPublisher:
                 fut = self._producer.send(self._config.topic, value=payload)
                 fut.get(timeout=10)
                 retry_payload = None
+                _json_pub_sent_total.labels(client_id=self._client_id, topic=self._config.topic).inc()
 
             except Exception as e:
                 retry_payload = payload
                 self._close_producer()
+                _json_pub_errors_total.labels(client_id=self._client_id, topic=self._config.topic).inc()
 
                 emit_audit_event(
                     "kafka.publish.error",

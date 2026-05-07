@@ -26,6 +26,14 @@ _raw_in_total = Counter("layer2_raw_in_total", "ValidatedTick messages consumed 
 _bad_in_total = Counter("layer2_bad_in_total", "ValidatedTick messages that failed decoding/validation.")
 _scored_out_total = Counter("layer2_scored_out_total", "ScoredTick messages published.")
 _last_anomaly = Gauge("layer2_last_anomaly_score", "Last anomaly score emitted.", ["symbol"])
+_last_if = Gauge("layer2_last_if_score", "Last IsolationForest score emitted.", ["symbol"])
+_last_hst = Gauge("layer2_last_hst_score", "Last Half-Space Trees score emitted.", ["symbol"])
+_last_trust = Gauge("layer2_last_input_trust_score", "Last trust score seen by Layer 2.", ["symbol"])
+_last_input_lag_ms = Gauge(
+    "layer2_last_input_lag_ms",
+    "Lag between ValidatedTick timestamp and Layer 2 processing time.",
+    ["symbol"],
+)
 _last_state = Gauge(
     "layer2_system_state",
     "System state encoded as 0=NORMAL,1=CONSERVATIVE,2=DEGRADED,3=HALT.",
@@ -97,6 +105,12 @@ class Layer2Service:
         system_state = self.gate.update(trust=float(tick.trust_score), anomaly=float(scores.anomaly_score))
         _last_state.set(_STATE_NUM.get(system_state, 0.0))
         _last_anomaly.labels(symbol=tick.symbol).set(float(scores.anomaly_score))
+        _last_if.labels(symbol=tick.symbol).set(float(scores.if_score))
+        _last_hst.labels(symbol=tick.symbol).set(float(scores.hst_score))
+        _last_trust.labels(symbol=tick.symbol).set(float(tick.trust_score))
+        _last_input_lag_ms.labels(symbol=tick.symbol).set(
+            max(0.0, float(int(time.time() * 1000) - int(tick.timestamp_utc)))
+        )
 
         out = ScoredTick(
             symbol=tick.symbol,

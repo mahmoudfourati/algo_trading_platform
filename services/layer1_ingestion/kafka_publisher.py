@@ -15,9 +15,37 @@ from typing import Optional
 
 from kafka import KafkaAdminClient, KafkaProducer
 from kafka.admin import NewTopic
+from prometheus_client import Counter, Gauge
 
 from shared.audit import emit_audit_event
 from shared.schemas import NormalizedTick, RawTick
+
+
+_publisher_enqueued_total = Counter(
+    "layer1_ingestion_kafka_enqueued_total",
+    "Raw tick messages enqueued to the Kafka outage buffer.",
+)
+
+_publisher_sent_total = Counter(
+    "layer1_ingestion_kafka_sent_total",
+    "Raw tick messages successfully sent to Kafka.",
+)
+
+_publisher_dropped_total = Counter(
+    "layer1_ingestion_kafka_dropped_total",
+    "Raw tick messages dropped because outage buffer was full.",
+    ["reason"],
+)
+
+_publisher_errors_total = Counter(
+    "layer1_ingestion_kafka_publish_errors_total",
+    "Kafka publish errors in raw tick publisher.",
+)
+
+_publisher_queue_depth = Gauge(
+    "layer1_ingestion_kafka_buffer_depth",
+    "Current number of messages waiting in the raw tick outage buffer.",
+)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -90,6 +118,8 @@ class RawTickKafkaPublisher:
         payload = self._serialize_tick(RawTick.model_validate(tick.model_dump()))
         try:
             self._queue.put_nowait(payload)
+            _publisher_enqueued_total.inc()
+            _publisher_queue_depth.set(self._queue.qsize())
             return
         except queue.Full:
             pass
@@ -105,6 +135,8 @@ class RawTickKafkaPublisher:
         except queue.Full:
             # If we still can't enqueue, drop the new message.
             self._dropped_total += 1
+            _publisher_dropped_total.labels(reason="drop_new").inc()
+            _publisher_queue_depth.set(self._queue.qsize())
             emit_audit_event(
                 "kafka.outage_buffer.drop",
                 source="layer1_ingestion.kafka_publisher",
@@ -117,6 +149,8 @@ class RawTickKafkaPublisher:
             return
 
         self._dropped_total += 1
+        _publisher_dropped_total.labels(reason="drop_oldest").inc()
+        _publisher_queue_depth.set(self._queue.qsize())
         emit_audit_event(
             "kafka.outage_buffer.drop",
             source="layer1_ingestion.kafka_publisher",
@@ -203,6 +237,7 @@ class RawTickKafkaPublisher:
             if retry_payload is None:
                 try:
                     payload = self._queue.get(timeout=0.2)
+                    _publisher_queue_depth.set(self._queue.qsize())
                 except queue.Empty:
                     continue
             else:
@@ -217,11 +252,13 @@ class RawTickKafkaPublisher:
                 fut = self._producer.send(self._config.topic, value=payload)
                 fut.get(timeout=10)
                 retry_payload = None
+                _publisher_sent_total.inc()
 
             except Exception as e:
                 # Treat as outage: keep the payload for retry, close producer, and back off.
                 retry_payload = payload
                 self._close_producer()
+                _publisher_errors_total.inc()
 
                 emit_audit_event(
                     "kafka.publish.error",
