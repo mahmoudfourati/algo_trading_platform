@@ -25,12 +25,13 @@ class OrderFlowImbalanceSnapshot:
     sell_volume: float
     tick_count: int
     window_size: int
+    ofi_zscore: Optional[float] = None
 
 
 class OrderFlowImbalanceState:
     """Maintain rolling OFI over the last N ticks for one symbol."""
 
-    def __init__(self, *, symbol: str, window_size: int = 50) -> None:
+    def __init__(self, *, symbol: str, window_size: int = 50, z_window_size: Optional[int] = None) -> None:
         if window_size <= 0:
             raise ValueError("window_size must be positive")
 
@@ -38,6 +39,11 @@ class OrderFlowImbalanceState:
         self.window_size = window_size
         self._signed_volumes: Deque[float] = deque()
         self._previous_mid_price: Optional[float] = None
+        # OFI z-score history and rolling stats
+        self.z_window_size = z_window_size if z_window_size is not None else window_size
+        self._ofi_history: Deque[float] = deque()
+        self._ofi_sum = 0.0
+        self._ofi_sumsq = 0.0
 
     def reset(self) -> None:
         """Clear rolling state without changing configuration."""
@@ -69,11 +75,31 @@ class OrderFlowImbalanceState:
         denominator = buy_volume + sell_volume
         ofi = 0.0 if denominator == 0.0 else (buy_volume - sell_volume) / denominator
 
+        # maintain OFI history for z-score computation
+        self._ofi_history.append(ofi)
+        self._ofi_sum += ofi
+        self._ofi_sumsq += ofi * ofi
+        if len(self._ofi_history) > self.z_window_size:
+            old = self._ofi_history.popleft()
+            self._ofi_sum -= old
+            self._ofi_sumsq -= old * old
+
+        ofi_zscore: Optional[float]
+        n = len(self._ofi_history)
+        if n <= 1:
+            ofi_zscore = 0.0
+        else:
+            mean = self._ofi_sum / n
+            var = (self._ofi_sumsq - (self._ofi_sum * self._ofi_sum) / n) / (n - 1)
+            std = var ** 0.5 if var > 0.0 else 0.0
+            ofi_zscore = 0.0 if std == 0.0 else (ofi - mean) / std
+
         return OrderFlowImbalanceSnapshot(
             symbol=self.symbol,
             timestamp_utc=tick.timestamp_utc,
             mid_price=float(tick.mid_price),
             ofi=ofi,
+            ofi_zscore=ofi_zscore,
             buy_volume=buy_volume,
             sell_volume=sell_volume,
             tick_count=len(self._signed_volumes),

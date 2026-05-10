@@ -23,16 +23,16 @@ ConfluenceLevel = Literal["FULL", "PARTIAL", "NONE"]
 class SignalThresholds:
     """Thresholds used by the Layer 3 dual-timeframe decision gate."""
 
-    long_rsi_min: float = 25.0
-    long_rsi_max: float = 45.0
-    short_rsi_min: float = 55.0
-    short_rsi_max: float = 75.0
-    bollinger_buffer_pct: float = 0.003
+    long_rsi_min: float = 15.0
+    long_rsi_max: float = 55.0
+    short_rsi_min: float = 45.0
+    short_rsi_max: float = 85.0
+    bollinger_buffer_pct: float = 0.01
     bollinger_strong_pct: float = 0.01
     ema_cross_window: int = 3
-    ema_cross_margin_pct: float = 0.001
-    ofi_long_threshold: float = 0.03
-    ofi_short_threshold: float = 0.03
+    ema_cross_margin_pct: float = 0.005
+    ofi_long_threshold: float = 0.20
+    ofi_short_threshold: float = 0.20
     higher_long_rsi_max: float = 55.0
     higher_short_rsi_min: float = 45.0
 
@@ -104,8 +104,8 @@ def evaluate_dual_timeframe_signal(
     primary_window = list(primary_snapshots[-thresholds.ema_cross_window :])
     higher_window = list(higher_snapshots[-2:])
 
-    long_primary = _primary_long_gate(latest_primary, primary_window, thresholds)
-    short_primary = _primary_short_gate(latest_primary, primary_window, thresholds)
+    long_primary, long_breakdown = _primary_long_gate(latest_primary, primary_window, thresholds)
+    short_primary, short_breakdown = _primary_short_gate(latest_primary, primary_window, thresholds)
 
     if long_primary and ofi_snapshot.ofi <= thresholds.ofi_long_threshold:
         return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="OFI long gate failed")
@@ -114,7 +114,7 @@ def evaluate_dual_timeframe_signal(
 
     if long_primary:
         confluence_count = _higher_timeframe_confluence_long(latest_higher, higher_window, thresholds)
-        if confluence_count < 2:
+        if confluence_count < 1:
             return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="higher timeframe disagreement")
         signal_strength = _signal_strength_long(latest_primary, primary_window, thresholds)
         confluence = "FULL" if confluence_count == 3 else "PARTIAL"
@@ -135,7 +135,7 @@ def evaluate_dual_timeframe_signal(
 
     if short_primary:
         confluence_count = _higher_timeframe_confluence_short(latest_higher, higher_window, thresholds)
-        if confluence_count < 2:
+        if confluence_count < 1:
             return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="higher timeframe disagreement")
         signal_strength = _signal_strength_short(latest_primary, primary_window, thresholds)
         confluence = "FULL" if confluence_count == 3 else "PARTIAL"
@@ -154,7 +154,11 @@ def evaluate_dual_timeframe_signal(
             reason="short signal",
         )
 
-    return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="primary gate failed")
+    # Determine which breakdown to use based on which gate was evaluated
+    gate_breakdown = long_breakdown if not short_primary else short_breakdown
+    failing_conditions = [k for k, v in gate_breakdown.items() if not v]
+    breakdown_str = "|" + ",".join(failing_conditions) if failing_conditions else ""
+    return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason=f"primary gate failed{breakdown_str}")
 
 
 def _hold_signal(
@@ -184,20 +188,26 @@ def _hold_signal(
     )
 
 
-def _primary_long_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnapshot], thresholds: SignalThresholds) -> bool:
+def _primary_long_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnapshot], thresholds: SignalThresholds) -> tuple[bool, dict[str, bool]]:
     rsi_ok = latest.rsi is not None and thresholds.long_rsi_min <= latest.rsi <= thresholds.long_rsi_max
     macd_ok = _histogram_trending_up(recent, direction="LONG")
     bollinger_ok = latest.bollinger_lower is not None and latest.close <= latest.bollinger_lower * (1.0 + thresholds.bollinger_buffer_pct)
     ema_ok = _ema_alignment_ok(recent, direction="LONG", thresholds=thresholds)
-    return rsi_ok and macd_ok and bollinger_ok and ema_ok
+    breakdown = {"rsi_ok": rsi_ok, "macd_ok": macd_ok, "bollinger_ok": bollinger_ok, "ema_ok": ema_ok}
+    # Require: (RSI + Bollinger) AND (MACD OR EMA)
+    result = (rsi_ok and bollinger_ok) and (macd_ok or ema_ok)
+    return result, breakdown
 
 
-def _primary_short_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnapshot], thresholds: SignalThresholds) -> bool:
+def _primary_short_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnapshot], thresholds: SignalThresholds) -> tuple[bool, dict[str, bool]]:
     rsi_ok = latest.rsi is not None and thresholds.short_rsi_min <= latest.rsi <= thresholds.short_rsi_max
     macd_ok = _histogram_trending_up(recent, direction="SHORT")
     bollinger_ok = latest.bollinger_upper is not None and latest.close >= latest.bollinger_upper * (1.0 - thresholds.bollinger_buffer_pct)
     ema_ok = _ema_alignment_ok(recent, direction="SHORT", thresholds=thresholds)
-    return rsi_ok and macd_ok and bollinger_ok and ema_ok
+    breakdown = {"rsi_ok": rsi_ok, "macd_ok": macd_ok, "bollinger_ok": bollinger_ok, "ema_ok": ema_ok}
+    # Require: (RSI + Bollinger) AND (MACD OR EMA)
+    result = (rsi_ok and bollinger_ok) and (macd_ok or ema_ok)
+    return result, breakdown
 
 
 def _histogram_trending_up(recent: Sequence[IndicatorSnapshot], *, direction: str) -> bool:

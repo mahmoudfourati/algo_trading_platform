@@ -37,6 +37,34 @@ _last_ofi = Gauge("layer3_last_ofi", "Last order flow imbalance emitted.", ["sym
 
 
 @dataclass
+class Layer3Telemetry:
+    """Counters describing Layer 3 signal generation behavior."""
+
+    ticks_seen: int = 0
+    candles_5m_finalized: int = 0
+    candles_1h_finalized: int = 0
+    signal_checks: int = 0
+    signals_emitted: int = 0
+    long_signals: int = 0
+    short_signals: int = 0
+    hold_signals: int = 0
+    hold_missing_ofi: int = 0
+    hold_missing_primary_history: int = 0
+    hold_missing_higher_history: int = 0
+    hold_primary_candle_unreliable: int = 0
+    hold_system_state_halt: int = 0
+    hold_system_state_degraded: int = 0
+    hold_primary_gate_failed: int = 0
+    hold_primary_rsi_failed: int = 0
+    hold_primary_macd_failed: int = 0
+    hold_primary_bollinger_failed: int = 0
+    hold_primary_ema_failed: int = 0
+    hold_ofi_gate_failed: int = 0
+    hold_higher_timeframe_disagreement: int = 0
+    hold_unknown: int = 0
+
+
+@dataclass
 class Layer3SymbolState:
     """In-memory state for one symbol's Layer 3 processing pipeline."""
 
@@ -47,6 +75,7 @@ class Layer3SymbolState:
     primary_history: Deque[IndicatorSnapshot] = field(init=False)
     higher_history: Deque[IndicatorSnapshot] = field(init=False)
     latest_ofi: Optional[OrderFlowImbalanceSnapshot] = None
+    telemetry: Layer3Telemetry = field(init=False)
 
     def __post_init__(self) -> None:
         self.candle_manager = CandleAggregationManager(symbol=self.symbol)
@@ -54,8 +83,10 @@ class Layer3SymbolState:
         self.ofi_state = OrderFlowImbalanceState(symbol=self.symbol)
         self.primary_history = deque(maxlen=3)
         self.higher_history = deque(maxlen=2)
+        self.telemetry = Layer3Telemetry()
 
     def ingest_tick(self, tick: ScoredTick) -> list[TradeSignal]:
+        self.telemetry.ticks_seen += 1
         self.latest_ofi = self.ofi_state.process(tick)
         _last_ofi.labels(symbol=self.symbol).set(float(self.latest_ofi.ofi))
 
@@ -70,9 +101,11 @@ class Layer3SymbolState:
                 continue
 
             if event.timeframe == "5m":
+                self.telemetry.candles_5m_finalized += 1
                 self.primary_history.append(snapshot)
                 produced_signals.extend(self._maybe_emit_signal(system_state=effective_state))
             elif event.timeframe == "1h":
+                self.telemetry.candles_1h_finalized += 1
                 self.higher_history.append(snapshot)
 
         return produced_signals
@@ -88,16 +121,26 @@ class Layer3SymbolState:
             if snapshot is None:
                 continue
             if event.timeframe == "5m":
+                self.telemetry.candles_5m_finalized += 1
                 self.primary_history.append(snapshot)
                 produced_signals.extend(self._maybe_emit_signal(system_state=effective_state))
             elif event.timeframe == "1h":
+                self.telemetry.candles_1h_finalized += 1
                 self.higher_history.append(snapshot)
         return produced_signals
 
     def _maybe_emit_signal(self, *, system_state: SystemState | None = None, tick: ScoredTick | None = None) -> list[TradeSignal]:
+        self.telemetry.signal_checks += 1
         if self.latest_ofi is None:
+            self.telemetry.hold_signals += 1
+            self.telemetry.hold_missing_ofi += 1
             return []
         if len(self.primary_history) < 3 or len(self.higher_history) < 2:
+            self.telemetry.hold_signals += 1
+            if len(self.primary_history) < 3:
+                self.telemetry.hold_missing_primary_history += 1
+            if len(self.higher_history) < 2:
+                self.telemetry.hold_missing_higher_history += 1
             return []
 
         resolved_state = system_state if system_state is not None else (tick.system_state if tick is not None else None)
@@ -114,10 +157,69 @@ class Layer3SymbolState:
         )
         sized = size_trade_signal(signal).signal
         if sized.direction == "HOLD":
+            self.telemetry.hold_signals += 1
+            reason = signal.reason or "unknown"
+            if reason == "primary candle not reliable":
+                self.telemetry.hold_primary_candle_unreliable += 1
+            elif reason.startswith("primary gate failed"):
+                self.telemetry.hold_primary_gate_failed += 1
+                # Parse breakdown from reason string: "primary gate failed|rsi_ok,macd_ok,..."
+                if "|" in reason:
+                    breakdown_str = reason.split("|", 1)[1]
+                    if "rsi_ok" in breakdown_str:
+                        self.telemetry.hold_primary_rsi_failed += 1
+                    if "macd_ok" in breakdown_str:
+                        self.telemetry.hold_primary_macd_failed += 1
+                    if "bollinger_ok" in breakdown_str:
+                        self.telemetry.hold_primary_bollinger_failed += 1
+                    if "ema_ok" in breakdown_str:
+                        self.telemetry.hold_primary_ema_failed += 1
+            elif reason in {"OFI long gate failed", "OFI short gate failed"}:
+                self.telemetry.hold_ofi_gate_failed += 1
+            elif reason == "higher timeframe disagreement":
+                self.telemetry.hold_higher_timeframe_disagreement += 1
+            elif reason == "system_state=HALT":
+                self.telemetry.hold_system_state_halt += 1
+            elif reason == "system_state=DEGRADED":
+                self.telemetry.hold_system_state_degraded += 1
+            else:
+                self.telemetry.hold_unknown += 1
             return []
+        self.telemetry.signals_emitted += 1
+        if sized.direction == "LONG":
+            self.telemetry.long_signals += 1
+        elif sized.direction == "SHORT":
+            self.telemetry.short_signals += 1
         _last_signal_size.labels(symbol=self.symbol).set(float(sized.size_pct))
         return [sized]
 
+    def get_telemetry(self) -> dict[str, object]:
+        """Return a flat snapshot for reporting."""
+
+        return {
+            "ticks_seen": self.telemetry.ticks_seen,
+            "candles_5m_finalized": self.telemetry.candles_5m_finalized,
+            "candles_1h_finalized": self.telemetry.candles_1h_finalized,
+            "signal_checks": self.telemetry.signal_checks,
+            "signals_emitted": self.telemetry.signals_emitted,
+            "long_signals": self.telemetry.long_signals,
+            "short_signals": self.telemetry.short_signals,
+            "hold_signals": self.telemetry.hold_signals,
+            "hold_missing_ofi": self.telemetry.hold_missing_ofi,
+            "hold_missing_primary_history": self.telemetry.hold_missing_primary_history,
+            "hold_missing_higher_history": self.telemetry.hold_missing_higher_history,
+            "hold_primary_candle_unreliable": self.telemetry.hold_primary_candle_unreliable,
+            "hold_system_state_halt": self.telemetry.hold_system_state_halt,
+            "hold_system_state_degraded": self.telemetry.hold_system_state_degraded,
+            "hold_primary_gate_failed": self.telemetry.hold_primary_gate_failed,
+            "hold_primary_rsi_failed": self.telemetry.hold_primary_rsi_failed,
+            "hold_primary_macd_failed": self.telemetry.hold_primary_macd_failed,
+            "hold_primary_bollinger_failed": self.telemetry.hold_primary_bollinger_failed,
+            "hold_primary_ema_failed": self.telemetry.hold_primary_ema_failed,
+            "hold_ofi_gate_failed": self.telemetry.hold_ofi_gate_failed,
+            "hold_higher_timeframe_disagreement": self.telemetry.hold_higher_timeframe_disagreement,
+            "hold_unknown": self.telemetry.hold_unknown,
+        }
 
 @dataclass
 class Layer3Service:

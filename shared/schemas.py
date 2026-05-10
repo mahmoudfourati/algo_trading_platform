@@ -26,6 +26,10 @@ class RawTick(BaseModel):
     received_timestamp_ms: int
     timestamp_source: Literal["exchange", "receive"] = "exchange"
     sequence_id: Optional[int] = None
+    # Set by the adapter after TLS pin verification. Defaults to True so that
+    # messages produced before this field existed (or in backtest/test contexts
+    # where pinning is not performed) are not penalised.
+    tls_ok: bool = True
 
     @property
     def mid(self) -> float:
@@ -45,6 +49,9 @@ class NormalizedTick(BaseModel):
     received_timestamp_ms: int
     timestamp_source: Literal["exchange", "receive"] = "exchange"
     sequence_id: Optional[int] = None
+    # Mirrors RawTick.tls_ok — carried through the adapter pipeline so the
+    # validated service can read the real pin-check result from the tick itself.
+    tls_ok: bool = True
 
     @property
     def mid(self) -> float:

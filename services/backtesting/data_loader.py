@@ -203,15 +203,42 @@ class HistoricalTickLoader:
         finally:
             conn.close()
 
+    def _resolve_multi_exchange_sources(self) -> list[Path]:
+        """Resolve paths to individual exchange CSVs (binance, bybit, coinbase, kraken, okx)."""
+        exchange_names = ['binance', 'bybit', 'coinbase', 'kraken', 'okx']
+        base_dir = Path('artifacts/backtest_data')
+        sources = []
+        
+        for ex in exchange_names:
+            path = base_dir / f"{ex}_ticks.csv"
+            if path.exists():
+                sources.append(path)
+        
+        return sources
+
     def load(self) -> list[HistoricalTickRecord]:
         """Return all historical ticks for the configured date range."""
 
+        # Try multi-exchange first
+        multi_sources = self._resolve_multi_exchange_sources()
+        if multi_sources:
+            records: list[HistoricalTickRecord] = []
+            for source in multi_sources:
+                records.extend([
+                    rec for rec in self._iter_source_rows(source)
+                    if rec.symbol in self.symbols and self.start_date <= rec.timestamp_utc <= self.end_date
+                ])
+            records.sort(key=lambda rec: (rec.timestamp_utc, rec.exchange))
+            self._write_cache(records)
+            return records
+        
+        # Fall back to single source
         source = self._resolve_source()
         records: list[HistoricalTickRecord] = []
 
         if source is None:
             raise FileNotFoundError(
-                "No historical tick source found. Provide source_path or create artifacts/backtest_data/ticks_raw.csv"
+                "No historical tick source found. Provide source_path or create artifacts/backtest_data/*.csv"
             )
 
         if source.suffix.lower() == ".sqlite":

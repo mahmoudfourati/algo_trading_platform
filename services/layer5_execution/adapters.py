@@ -99,9 +99,16 @@ class SimulatedExecutionAdapter:
         in the direction of the trade and charges a fee on the notional.
         """
 
-        client_order_id = str(order.get("client_order_id", ""))
-        size_pct = float(order.get("size_pct", 0.0))
-        direction = order.get("direction", "LONG")
+        # Robust field extraction: works with both dicts and dataclass objects
+        is_mapping = isinstance(order, Mapping)
+        if is_mapping:
+            client_order_id = str(order.get("client_order_id", ""))
+            size_pct = float(order.get("size_pct", 0.0))
+            direction = order.get("direction", "LONG")
+        else:
+            client_order_id = str(getattr(order, "client_order_id", ""))
+            size_pct = float(getattr(order, "size_pct", 0.0))
+            direction = getattr(order, "direction", "LONG")
 
         if client_order_id and client_order_id in self._status:
             raise DuplicateOrderError(f"duplicate client_order_id={client_order_id}")
@@ -123,8 +130,10 @@ class SimulatedExecutionAdapter:
             filled = size_pct
             note = "full"
 
-        notional = filled * (order.get("portfolio_value", 1.0))
-        fee_paid = abs(notional * fill_price) * self._fee_pct_for(order)
+        notional = filled * float(order.get("portfolio_value", 1.0))
+        # fee should be applied to the notional (quote currency); do NOT multiply
+        # by price again — that double-applies price and overstates fees.
+        fee_paid = abs(notional) * self._fee_pct_for(order)
         latency_ms = self._deterministic_latency(order)
 
         if client_order_id:

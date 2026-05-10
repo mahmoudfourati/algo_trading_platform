@@ -12,6 +12,7 @@ import platform
 import sys
 import statistics
 import time
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path

@@ -21,6 +21,8 @@ def _indicator_snapshot(
     ema_slow: float | None,
     ema_alignment: str | None = None,
     ema_cross: str | None = None,
+    adx: float | None = None,
+    regime: str | None = None,
     candle_reliable: bool = True,
 ) -> IndicatorSnapshot:
     return IndicatorSnapshot(
@@ -41,6 +43,8 @@ def _indicator_snapshot(
         ema_alignment=ema_alignment,
         ema_cross=ema_cross,
         atr=1.0,
+        adx=adx,
+        regime=regime,
         candle_reliable=candle_reliable,
     )
 

@@ -89,7 +89,7 @@ class BacktestConfig:
     if_weight: float = 0.45
     hst_weight: float = 0.55
     trust_threshold: float = 0.60
-    anomaly_threshold: float = 0.80
+    anomaly_threshold: float = 0.70
 
 
 @dataclass(frozen=True)
@@ -386,7 +386,7 @@ class BacktestEngine:
         from services.layer5_execution.adapters import SimulatedExecutionAdapter
 
         exec_adapter = SimulatedExecutionAdapter()
-        capital_base = 1.0
+        capital_base = 100_000.0  # Use realistic capital base (e.g., 100k USDT)
         execution_engine = ExecutionEngine(adapter=exec_adapter, portfolio_value=capital_base)
         per_trade_rows: list[dict[str, object]] = []
         _trade_id_counter = 1
@@ -446,11 +446,11 @@ class BacktestEngine:
             )
             net_cash -= order.size_pct * 0.001
 
-        def close_order(*, trade_price: float, timestamp_utc: int) -> None:
+        def close_order(*, trade_price: float, timestamp_utc: int) -> float:
             nonlocal open_position, gross_cash, net_cash, trade_pnls
 
             if open_position is None:
-                return
+                return 0.0
 
             price_return = (trade_price - open_position.entry_price) / open_position.entry_price
             if open_position.direction == "SHORT":
@@ -462,6 +462,7 @@ class BacktestEngine:
             trade_pnls.append(realized_net)
             layer4.register_closed_trade(realized_pnl_pct=realized_net, direction=open_position.direction, timestamp_utc=timestamp_utc)
             open_position = None
+            return realized_net
 
         start_ms = min(rec.timestamp_ms for rec in records)
         end_ms = max(rec.timestamp_ms for rec in records)
@@ -499,6 +500,35 @@ class BacktestEngine:
                         reduced_state_ticks += 1
                     elif layer4.state.circuit_breaker_state == "HALTED":
                         halted_state_ticks += 1
+
+                    # Check for stop-loss or take-profit exit
+                    if open_position is not None and layer4.state.last_approved_order is not None:
+                        order = layer4.state.last_approved_order
+                        sl_price = getattr(order, 'stop_loss_price', None)
+                        tp_price = getattr(order, 'take_profit_price', None)
+                        
+                        exit_triggered = False
+                        exit_reason = ""
+                        
+                        if open_position.direction == "LONG":
+                            if sl_price is not None and scored.mid_price <= sl_price:
+                                exit_triggered = True
+                                exit_reason = "STOP_HIT"
+                            elif tp_price is not None and scored.mid_price >= tp_price:
+                                exit_triggered = True
+                                exit_reason = "TP_HIT"
+                        elif open_position.direction == "SHORT":
+                            if sl_price is not None and scored.mid_price >= sl_price:
+                                exit_triggered = True
+                                exit_reason = "STOP_HIT"
+                            elif tp_price is not None and scored.mid_price <= tp_price:
+                                exit_triggered = True
+                                exit_reason = "TP_HIT"
+                        
+                        if exit_triggered:
+                            realized_pnl = close_order(trade_price=scored.mid_price, timestamp_utc=scored.timestamp_utc)
+                            per_trade_rows[-1]["exit_reason"] = exit_reason
+                            per_trade_rows[-1]["net_pnl"] = realized_pnl
 
                     if attack_activity_budget > 0:
                         if scored.anomaly_score >= self.config.anomaly_threshold:
@@ -560,8 +590,8 @@ class BacktestEngine:
                         # executed.filled_pct is fraction of portfolio filled (size_pct or capped partial)
                         filled_size = executed.filled_pct
                         filled_notional = filled_size * capital_base
-                        # fees are denominated in quote, subtract from net
-                        net_cash -= executed.fee_paid
+                        # fees are denominated in quote currency; convert to portfolio fraction
+                        net_cash -= executed.fee_paid / capital_base
                         gross_cash -= 0.0  # gross_cash remains PnL-only here
 
                         last_signal_direction = order.direction
@@ -671,6 +701,10 @@ class BacktestEngine:
             max_drawdown = max(max_drawdown, peak_equity - equity_net)
             equity_net_history.append(equity_net)
 
+        layer3_stats = layer3.get_telemetry()
+        layer4_stats = layer4.get_telemetry()
+        layer5_stats = execution_engine.get_telemetry()
+
         gross_pnl = gross_cash
         net_pnl = net_cash
         win_rate = (sum(1 for pnl in trade_pnls if pnl > 0) / len(trade_pnls)) if trade_pnls else 0.0
@@ -725,6 +759,9 @@ class BacktestEngine:
             risk_reduced_ticks=locals().get("reduced_state_ticks", 0),
             risk_halted_ticks=locals().get("halted_state_ticks", 0),
             total_ticks=scored_total,
+            layer3_statistics=layer3_stats,
+            layer4_statistics=layer4_stats,
+            layer5_statistics=layer5_stats,
             events=events,
         )
 

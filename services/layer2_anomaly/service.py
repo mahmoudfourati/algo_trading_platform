@@ -25,20 +25,22 @@ from .engine import DecisionGate, Layer2ScoringEngine
 _raw_in_total = Counter("layer2_raw_in_total", "ValidatedTick messages consumed (including bad).")
 _bad_in_total = Counter("layer2_bad_in_total", "ValidatedTick messages that failed decoding/validation.")
 _scored_out_total = Counter("layer2_scored_out_total", "ScoredTick messages published.")
+
 _last_anomaly = Gauge("layer2_last_anomaly_score", "Last anomaly score emitted.", ["symbol"])
 _last_if = Gauge("layer2_last_if_score", "Last IsolationForest score emitted.", ["symbol"])
 _last_hst = Gauge("layer2_last_hst_score", "Last Half-Space Trees score emitted.", ["symbol"])
 _last_trust = Gauge("layer2_last_input_trust_score", "Last trust score seen by Layer 2.", ["symbol"])
+
 _last_input_lag_ms = Gauge(
     "layer2_last_input_lag_ms",
     "Lag between ValidatedTick timestamp and Layer 2 processing time.",
     ["symbol"],
 )
+
 _last_state = Gauge(
     "layer2_system_state",
     "System state encoded as 0=NORMAL,1=CONSERVATIVE,2=DEGRADED,3=HALT.",
 )
-
 
 _STATE_NUM = {"NORMAL": 0.0, "CONSERVATIVE": 1.0, "DEGRADED": 2.0, "HALT": 3.0}
 
@@ -61,6 +63,7 @@ class Layer2Service:
         self._watchdog_in_halt = True
         self.gate.update(trust=0.0, anomaly=1.0)
         _last_state.set(_STATE_NUM.get(self.gate.state, 3.0))
+
         if previous_state != "HALT":
             emit_audit_event(
                 "layer2.watchdog.timeout",
@@ -103,6 +106,7 @@ class Layer2Service:
 
         prev_state = self.gate.state
         system_state = self.gate.update(trust=float(tick.trust_score), anomaly=float(scores.anomaly_score))
+
         _last_state.set(_STATE_NUM.get(system_state, 0.0))
         _last_anomaly.labels(symbol=tick.symbol).set(float(scores.anomaly_score))
         _last_if.labels(symbol=tick.symbol).set(float(scores.if_score))
@@ -189,7 +193,6 @@ def build_service() -> Layer2Service:
 
     bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVER", "localhost:29092")
     validated_topic = os.getenv("KAFKA_VALIDATED_TOPIC", "market.ticks.validated")
-
     group_id = os.getenv("KAFKA_GROUP_ID", f"layer2-anomaly-{int(time.time())}")
 
     consumer = KafkaConsumer(

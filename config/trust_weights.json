@@ -1,7 +1,8 @@
 {
-  "w1_tls": 0.25,
-  "w2_consensus": 0.3,
-  "w3_freshness": 0.2,
+  "w1_tls": 0.20,
+  "w2_consensus": 0.25,
+  "w3_freshness": 0.20,
   "w4_sequence": 0.15,
-  "w5_hash_chain": 0.1
+  "w5_hash_chain": 0.10,
+  "w_availability": 0.10
 }

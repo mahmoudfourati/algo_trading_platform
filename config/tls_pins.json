@@ -2,26 +2,26 @@
   "binance": {
     "host": "stream.binance.com",
     "port": 9443,
-    "sha256_fingerprint": "b4fc8d3dabbe3e3ba78650b8923b52627cfe48a91f28f245abccdef7680c44bb"
+    "spki_sha256": "fd8e8139ea8c8174bac23aa4e9e985b3e63e1d69085ced91f03a31e553b5613d"
   },
   "coinbase": {
     "host": "ws-feed.exchange.coinbase.com",
     "port": 443,
-    "sha256_fingerprint": "ed69989f083da9de050abf23a04d71a739b5146f22d6182333dd517005bdbad0"
+    "spki_sha256": "df10f8b2e4e479cbc2ba8ed78025517fff051ded906c063ac766411ee510f1b6"
   },
   "kraken": {
     "host": "ws.kraken.com",
     "port": 443,
-    "sha256_fingerprint": "27850526f2c56fe0a199a247ffba0471192081d6a4b38c8933423e7f0b469256"
+    "spki_sha256": "e7bdc4761f3b6fee1af1905e88b7b42e85122f83aff0a1771c4dd6b4fb1551b2"
   },
   "okx": {
     "host": "ws.okx.com",
     "port": 8443,
-    "sha256_fingerprint": "0119160662ea97c430cd7b4a639436403c4c90f83575b70551fdfff16ae980c8"
+    "spki_sha256": "c36fef04a9be0699c16ea462035ad535d0f405948082a645d0226316b57a0d79"
   },
   "bybit": {
     "host": "stream.bybit.com",
     "port": 443,
-    "sha256_fingerprint": "ae1847dcbd3f729f4d34e9d95b3a7962e48785efc1c39d8baa62ce4771fdb7b6"
+    "spki_sha256": "8bd311f5d672a3b73aa75ed5a9db17314860199c203ac482362eee1690777ef4"
   }
 }

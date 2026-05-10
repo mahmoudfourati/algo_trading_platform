@@ -2,3 +2,4 @@
 kafka-python==2.0.2
 pydantic==2.9.2
 prometheus-client==0.21.0
+cryptography>=42.0.0

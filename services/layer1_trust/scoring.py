@@ -1,6 +1,7 @@
 """Layer 1 trust scoring.
 
-Computes subscores (T1..T5) and aggregates them into a weighted trust score in [0,1].
+Computes subscores (T1..T5 + T_availability) and aggregates them into a weighted
+trust score in [0,1].
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 from shared.schemas import ExchangeId, NormalizedTick
 
@@ -27,6 +28,7 @@ class TrustWeights:
     w3_freshness: float
     w4_sequence: float
     w5_hash_chain: float
+    w_availability: float
 
     def as_dict(self) -> Dict[str, float]:
         return {
@@ -35,6 +37,7 @@ class TrustWeights:
             "T3": self.w3_freshness,
             "T4": self.w4_sequence,
             "T5": self.w5_hash_chain,
+            "T_availability": self.w_availability,
         }
 
 
@@ -54,6 +57,7 @@ def load_trust_weights(path: Optional[str] = None) -> TrustWeights:
         w3_freshness=float(raw["w3_freshness"]),
         w4_sequence=float(raw["w4_sequence"]),
         w5_hash_chain=float(raw["w5_hash_chain"]),
+        w_availability=float(raw.get("w_availability", 0.1)),  # Default 0.1 for backward compat
     )
 
 
@@ -127,6 +131,29 @@ def t5_hash_chain_continuity(*, chain_ok: bool) -> float:
     return 1.0 if chain_ok else 0.0
 
 
+def t_availability(*, active_exchanges: Set[ExchangeId], configured_exchanges: Set[ExchangeId]) -> float:
+    """Exchange availability score.
+    
+    Penalizes missing exchanges to incentivize multi-source resilience.
+    
+    T_availability = active_exchanges / configured_exchanges
+    
+    Args:
+        active_exchanges: Set of exchanges that contributed to this window
+        configured_exchanges: Set of all exchanges that should be active
+        
+    Returns:
+        Score in [0, 1] where 1.0 = all configured exchanges active
+    """
+    if not configured_exchanges:
+        return 1.0
+    
+    active_count = len(active_exchanges & configured_exchanges)
+    configured_count = len(configured_exchanges)
+    
+    return float(active_count) / float(configured_count)
+
+
 def compute_trust_score(*, weights: TrustWeights, subscores: Dict[str, float]) -> float:
     """Weighted linear trust score: T = sum(w_i * T_i)."""
 
@@ -136,6 +163,7 @@ def compute_trust_score(*, weights: TrustWeights, subscores: Dict[str, float]) -
         + weights.w3_freshness * float(subscores["T3"])
         + weights.w4_sequence * float(subscores["T4"])
         + weights.w5_hash_chain * float(subscores["T5"])
+        + weights.w_availability * float(subscores.get("T_availability", 1.0))
     )
 
     # Trust score is defined on [0,1].
@@ -149,11 +177,36 @@ def compute_subscores(
     latency_ms: float,
     sequence_gap: Optional[int],
     chain_ok: bool,
+    active_exchanges: Optional[Set[ExchangeId]] = None,
+    configured_exchanges: Optional[Set[ExchangeId]] = None,
 ) -> Dict[str, float]:
-    return {
+    """Compute all trust subscores.
+    
+    Args:
+        tls_ok: TLS pin verification passed
+        t2: Consensus agreement score (pre-computed)
+        latency_ms: Median latency in milliseconds
+        sequence_gap: Sequence ID gap (None if not available)
+        chain_ok: Hash chain continuity check passed
+        active_exchanges: Set of exchanges active in this window (optional)
+        configured_exchanges: Set of all configured exchanges (optional)
+        
+    Returns:
+        Dict of subscore name -> value in [0, 1]
+    """
+    subscores = {
         "T1": t1_tls_validity(tls_ok=tls_ok),
         "T2": max(0.0, min(1.0, float(t2))),
         "T3": t3_latency_freshness(latency_ms=latency_ms),
         "T4": t4_sequence_integrity(gap=sequence_gap),
         "T5": t5_hash_chain_continuity(chain_ok=chain_ok),
     }
+    
+    # Add availability score if exchange sets provided
+    if active_exchanges is not None and configured_exchanges is not None:
+        subscores["T_availability"] = t_availability(
+            active_exchanges=active_exchanges,
+            configured_exchanges=configured_exchanges
+        )
+    
+    return subscores

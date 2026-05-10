@@ -22,6 +22,7 @@ from services.layer1_trust.scoring import TrustWeights, compute_subscores, compu
 from shared.audit import emit_audit_event
 from shared.metrics_http import start_metrics_http_server
 from shared.schemas import ExchangeId, NormalizedTick, ValidatedTick
+from shared.tls_health_registry import get_tls_health_registry
 
 from .liveness import ExchangeLivenessMonitor
 
@@ -80,6 +81,39 @@ _last_window_latency_ms = Gauge(
     ["symbol"],
 )
 
+# TLS/health observability (cached; derived from liveness monitor state)
+_tls_exchange_health = Gauge(
+    "tls_exchange_health",
+    "TLS health of the primary exchange for the last processed window (1=healthy, 0=unhealthy).",
+    ["symbol", "exchange_id"],
+)
+_tls_validation_failures_total = Counter(
+    "tls_validation_failures_total",
+    "Total number of windows where the primary exchange TLS pin health was unhealthy (derived).",
+    ["symbol", "exchange_id"],
+)
+_missing_tls_pins_total = Counter(
+    "missing_tls_pins_total",
+    "Total number of windows with missing/invalid TLS pins detected by derived TLS health (best-effort).",
+    ["symbol", "exchange_id"],
+)
+_active_exchange_count = Gauge(
+    "active_exchange_count",
+    "Number of exchange sources observed in the last processed window (used_sources).",
+    ["symbol"],
+)
+
+_availability_score = Gauge(
+    "availability_score",
+    "Exchange availability score (active/configured) for the last processed window.",
+    ["symbol"],
+)
+
+_unhealthy_exchange_count = Gauge(
+    "unhealthy_exchange_count",
+    "Number of configured exchanges currently marked TLS-unhealthy.",
+)
+
 
 def _parse_csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
@@ -112,16 +146,29 @@ def _primary_exchange(enabled_exchanges: list[ExchangeId]) -> ExchangeId:
 
 
 def _median_latency_ms(ticks: Iterable[NormalizedTick], *, now_ms: int) -> float:
-    # Only use ticks with a trustworthy exchange timestamp.
-    # Receive-time-only feeds are excluded so they do not masquerade as source-time freshness.
+    # Prefer ticks with a trustworthy exchange timestamp (T3 measures source-time freshness).
+    # Receive-time-only feeds (e.g. Kraken) are excluded from the primary calculation.
+    tick_list = list(ticks)
     latencies = [
         max(0, int(now_ms) - int(t.exchange_timestamp_ms))
-        for t in ticks
+        for t in tick_list
         if getattr(t, "timestamp_source", "exchange") == "exchange"
     ]
-    if not latencies:
-        return float("inf")
-    return float(statistics.median(latencies))
+    if latencies:
+        return float(statistics.median(latencies))
+
+    # Fallback: if every tick in the window is receive-time-only, use receive latency.
+    # This avoids returning inf (which collapses T3 to 0.0) when e.g. only Kraken
+    # ticks are present. The score will still be lower than a true exchange-timestamped
+    # window because receive latency is always >= source latency, but it won't be zero.
+    recv_latencies = [
+        max(0, int(now_ms) - int(t.received_timestamp_ms))
+        for t in tick_list
+    ]
+    if recv_latencies:
+        return float(statistics.median(recv_latencies))
+
+    return float("inf")
 
 
 def _median_spread(ticks: Iterable[NormalizedTick]) -> float:
@@ -154,6 +201,7 @@ class Layer1ValidatedService:
     enabled_exchanges: List[ExchangeId]
     primary_exchange: ExchangeId
     liveness: ExchangeLivenessMonitor
+    tls_registry: any  # TlsHealthRegistry
     _last_sequence_ids: Dict[Tuple[str, ExchangeId], int]
     _last_liveness_overdue: Dict[str, float]
     _last_liveness_check_s: float
@@ -238,6 +286,11 @@ class Layer1ValidatedService:
 
                 for window in self.aligner.add(tick):
                     self._process_window(window)
+                    
+                    # Update unhealthy exchange count metric
+                    health_snapshot = self.tls_registry.get_all_health()
+                    unhealthy_count = sum(1 for ex in self.enabled_exchanges if not health_snapshot.get(ex, True))
+                    _unhealthy_exchange_count.set(float(unhealthy_count))
         finally:
             self.hashlog.stop()
             self.publisher.stop()
@@ -270,9 +323,6 @@ class Layer1ValidatedService:
 
         usable_ticks = [primary_tick]
 
-        agreeing_sources = len(out.used_sources)
-        _last_window_used_sources.labels(symbol=symbol).set(float(agreeing_sources))
-
         tolerance = abs(out.consensus_mid) * float(self.consensus.config.divergence_tolerance)
         t2 = compute_t2(
             ticks_with_age=window.ticks_with_age,
@@ -283,11 +333,25 @@ class Layer1ValidatedService:
 
         latency_ms = _median_latency_ms(usable_ticks, now_ms=window.window_end_ms)
         _last_window_latency_ms.labels(symbol=symbol).set(latency_ms)
+        _last_window_used_sources.labels(symbol=symbol).set(float(len(out.used_sources)))
+
         spread = _median_spread(usable_ticks)
         volume_24h = _median_volume_24h(usable_ticks)
 
-        # Phase 2.2 pinning refuses mismatched connections, so ticks imply TLS OK.
-        tls_ok = True
+        # TLS health from the primary tick (stamped by the adapter after pin verification).
+        # The adapter stamps tls_ok on each tick after checking the pin, so we read the
+        # actual verification result that traveled through Kafka.
+        tls_ok = getattr(primary_tick, 'tls_ok', False)  # Default to False if field missing
+        _tls_exchange_health.labels(symbol=symbol, exchange_id=self.primary_exchange).set(1.0 if tls_ok else 0.0)
+        _active_exchange_count.labels(symbol=symbol).set(float(len(out.used_sources)))
+
+        if not tls_ok:
+            _tls_validation_failures_total.labels(symbol=symbol, exchange_id=self.primary_exchange).inc()
+            emit_audit_event(
+                "layer1.validated.tls_pin_health.unhealthy",
+                source="layer1_validated",
+                payload={"symbol": symbol, "exchange_id": self.primary_exchange},
+            )
 
         sequence_gap = self._compute_sequence_gap(
             symbol=symbol,
@@ -298,13 +362,24 @@ class Layer1ValidatedService:
         previous_hash = self.hashlog.tip
         chain_ok = True  # previous_hash is taken from current tip.
 
+        # Compute availability score
+        active_exchanges_set = set(out.used_sources)
+        configured_exchanges_set = set(self.enabled_exchanges)
+        
         subscores = compute_subscores(
             tls_ok=tls_ok,
             t2=t2,
             latency_ms=latency_ms,
             sequence_gap=sequence_gap,
             chain_ok=chain_ok,
+            active_exchanges=active_exchanges_set,
+            configured_exchanges=configured_exchanges_set,
         )
+        
+        # Update availability metric
+        availability = subscores.get("T_availability", 1.0)
+        _availability_score.labels(symbol=symbol).set(availability)
+        
         trust_score = compute_trust_score(weights=self.weights, subscores=subscores)
         _last_trust_score.labels(symbol=symbol).set(trust_score)
 
@@ -383,6 +458,8 @@ def build_service() -> Layer1ValidatedService:
         sources=[str(x) for x in enabled_exchanges],
         audit_fn=_audit,
     )
+    
+    tls_registry = get_tls_health_registry()
 
     return Layer1ValidatedService(
         consumer=consumer,
@@ -394,6 +471,7 @@ def build_service() -> Layer1ValidatedService:
         enabled_exchanges=enabled_exchanges,
         primary_exchange=primary_exchange,
         liveness=liveness,
+        tls_registry=tls_registry,
         _last_sequence_ids={},
         _last_liveness_overdue={},
         _last_liveness_check_s=0.0,
