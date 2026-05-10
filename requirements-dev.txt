@@ -1,5 +1,5 @@
 # Purpose: Dev/test dependencies for host-side tooling.
-kafka-python==2.0.2
+kafka-python-ng
 pytest==8.3.3
 pytest-asyncio==0.24.0
 websockets==12.0

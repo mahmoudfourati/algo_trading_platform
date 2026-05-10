@@ -151,8 +151,8 @@ def test_indicators_match_independent_reference_calculations() -> None:
     rsi_reference = _rsi_series(closes)
     macd_reference, signal_reference, histogram_reference = _macd_series(closes)
     bollinger_middle, bollinger_upper, bollinger_lower = _bollinger_series(closes)
-    ema_fast_reference = _ema_series(closes, 12)
-    ema_slow_reference = _ema_series(closes, 26)
+    ema_fast_reference = _ema_series(closes, 9)
+    ema_slow_reference = _ema_series(closes, 21)
     atr_reference = _atr_series([close + 1.0 for close in closes], [close - 1.0 for close in closes], closes)
 
     assert isclose(latest.close, closes[-1])
