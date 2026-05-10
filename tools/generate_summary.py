@@ -55,6 +55,31 @@ def generate_summary(run_dir: str) -> str:
     sig = "SIGNIFICANT" if metrics.get('permutation_p_value', 1.0) < 0.05 else "not significant"
     lines.append(f"                    ({sig})")
     lines.append("")
+
+    # live-soak style Layer 1 checklist
+    trust_stats = metrics.get('layer1_trust_statistics', {}) or {}
+    soak_checklist = metrics.get('layer1_soak_checklist', {}) or {}
+    if trust_stats:
+        lines.append("LAYER 1 SOAK CHECKLIST")
+        lines.append(f"  Trust score mean:   {trust_stats.get('mean', 0):.6f}")
+        lines.append(f"  Trust score std:    {trust_stats.get('std', 0):.6f}")
+        lines.append(f"  Trust score min/max:{trust_stats.get('min', 0):.6f} / {trust_stats.get('max', 0):.6f}")
+        lines.append(f"  Trust p5/p95:       {trust_stats.get('p5', 0):.6f} / {trust_stats.get('p95', 0):.6f}")
+        lines.append(f"  Trust range:        {trust_stats.get('range', 0):.6f}")
+        lines.append("")
+
+        def _check_line(label: str, key: str, threshold_hint: str) -> None:
+            value = bool(soak_checklist.get(key, False))
+            status = "PASS" if value else "FAIL"
+            mark = "✓" if value else "✗"
+            lines.append(f"  {mark} {label}: {status} ({threshold_hint})")
+
+        _check_line("Trust std > 0", "trust_score_std_gt_zero", "> 0.0")
+        _check_line("Trust range > 0.01", "trust_score_range_gt_001", "> 0.01")
+        _check_line("Trust p95 - p5 > 0.01", "trust_score_p95_minus_p5_gt_001", "> 0.01")
+        _check_line("T2 range > 0.01", "t2_range_gt_001", "> 0.01")
+        _check_line("T3 range > 0.01", "t3_range_gt_001", "> 0.01")
+        lines.append("")
     
     # layer metrics
     lines.append("LAYER STATISTICS")

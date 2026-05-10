@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import statistics
 from typing import List
 
 
@@ -53,7 +54,67 @@ class BacktestMetrics:
     risk_reduced_ticks: int = 0
     risk_halted_ticks: int = 0
     total_ticks: int = 0
+    layer3_statistics: dict[str, object] = field(default_factory=dict)
+    layer4_statistics: dict[str, object] = field(default_factory=dict)
+    layer5_statistics: dict[str, object] = field(default_factory=dict)
     events: List[ScoringEvent] = field(default_factory=list)
+
+    def _trust_values(self) -> list[float]:
+        return [event.trust_score for event in self.events]
+
+    def _t2_values(self) -> list[float]:
+        return [max(0.0, min(1.0, 1.0 - event.anomaly_score)) for event in self.events]
+
+    def _t3_values(self) -> list[float]:
+        return [event.if_score for event in self.events]
+
+    @staticmethod
+    def _percentile(values: list[float], p: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return float(ordered[0])
+        position = p * (len(ordered) - 1)
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        if lower == upper:
+            return float(ordered[lower])
+        fraction = position - lower
+        return float(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction)
+
+    def get_layer1_trust_statistics(self) -> dict[str, float]:
+        trust = self._trust_values()
+        if not trust:
+            return {}
+        return {
+            "mean": statistics.mean(trust),
+            "std": statistics.stdev(trust) if len(trust) > 1 else 0.0,
+            "min": min(trust),
+            "max": max(trust),
+            "p5": self._percentile(trust, 0.05),
+            "p25": self._percentile(trust, 0.25),
+            "p50": self._percentile(trust, 0.50),
+            "p75": self._percentile(trust, 0.75),
+            "p95": self._percentile(trust, 0.95),
+            "range": max(trust) - min(trust),
+        }
+
+    def get_layer1_soak_checklist(self) -> dict[str, object]:
+        trust_stats = self.get_layer1_trust_statistics()
+        if not trust_stats:
+            return {}
+
+        t2 = self._t2_values()
+        t3 = self._t3_values()
+        return {
+            "trust_score_std_gt_zero": trust_stats["std"] > 0.0,
+            "trust_score_range_gt_001": trust_stats["range"] > 0.01,
+            "trust_score_p95_minus_p5_gt_001": (trust_stats["p95"] - trust_stats["p5"]) > 0.01,
+            "t2_range_gt_001": (max(t2) - min(t2)) > 0.01 if t2 else False,
+            "t3_range_gt_001": (max(t3) - min(t3)) > 0.01 if t3 else False,
+            "normal_state_pct": self.normal_state_pct,
+        }
 
     def get_detection_rate(self) -> float:
         """Return detected anomalies divided by injected anomalies."""
@@ -79,6 +140,9 @@ class BacktestMetrics:
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the result bundle for JSON output."""
+
+        layer1_trust = self.get_layer1_trust_statistics()
+        layer1_soak_checklist = self.get_layer1_soak_checklist()
 
         return {
             "run_id": self.run_id,
@@ -109,6 +173,11 @@ class BacktestMetrics:
             "risk_reduced_ticks": self.risk_reduced_ticks,
             "risk_halted_ticks": self.risk_halted_ticks,
             "total_ticks": self.total_ticks,
+            "layer3_statistics": self.layer3_statistics,
+            "layer4_statistics": self.layer4_statistics,
+            "layer5_statistics": self.layer5_statistics,
             "detection_rate": self.get_detection_rate(),
             "false_positive_rate": self.get_false_positive_rate(),
+            "layer1_trust_statistics": layer1_trust,
+            "layer1_soak_checklist": layer1_soak_checklist,
         }

@@ -155,6 +155,99 @@ def _macd_series(values: Sequence[float], fast_period: int, slow_period: int, si
     return macd_line, signal_line, histogram
 
 
+def _adx_series(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int) -> list[Optional[float]]:
+    """Compute Average Directional Index (ADX) for trend strength measurement.
+    
+    ADX ranges from 0-100 where:
+    - 0-25: weak trend
+    - 25-50: developing trend
+    - 50-75: strong trend
+    - 75-100: very strong trend
+    """
+    if period <= 0:
+        raise ValueError("ADX period must be positive")
+    
+    outputs: list[Optional[float]] = [None] * len(highs)
+    if len(highs) < period + 1:
+        return outputs
+    
+    # Calculate Plus DM and Minus DM
+    plus_dm_list: list[float] = []
+    minus_dm_list: list[float] = []
+    tr_list: list[float] = []
+    
+    for index in range(1, len(highs)):
+        high_diff = highs[index] - highs[index - 1]
+        low_diff = lows[index - 1] - lows[index]
+        
+        plus_dm = max(high_diff, 0.0) if high_diff > low_diff else 0.0
+        minus_dm = max(low_diff, 0.0) if low_diff > high_diff else 0.0
+        
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+        
+        previous_close = closes[index - 1]
+        tr = _true_range(highs[index], lows[index], previous_close)
+        tr_list.append(tr)
+    
+    if len(tr_list) < period:
+        return outputs
+    
+    # Calculate DI+ and DI-
+    plus_di_list: list[float] = []
+    minus_di_list: list[float] = []
+    di_diff_list: list[float] = []
+    
+    plus_dm_sum = sum(plus_dm_list[:period])
+    minus_dm_sum = sum(minus_dm_list[:period])
+    tr_sum = sum(tr_list[:period])
+    
+    if tr_sum > 0:
+        plus_di = 100.0 * plus_dm_sum / tr_sum
+        minus_di = 100.0 * minus_dm_sum / tr_sum
+    else:
+        plus_di = 0.0
+        minus_di = 0.0
+    
+    plus_di_list.append(plus_di)
+    minus_di_list.append(minus_di)
+    di_diff = abs(plus_di - minus_di)
+    di_sum = plus_di + minus_di if (plus_di + minus_di) > 0 else 1.0
+    di_diff_list.append(100.0 * di_diff / di_sum if di_sum > 0 else 0.0)
+    
+    # Continue with smoothed values
+    for index in range(period, len(tr_list)):
+        plus_dm_sum = ((plus_dm_sum * (period - 1)) + plus_dm_list[index]) / period
+        minus_dm_sum = ((minus_dm_sum * (period - 1)) + minus_dm_list[index]) / period
+        tr_sum = ((tr_sum * (period - 1)) + tr_list[index]) / period
+        
+        if tr_sum > 0:
+            plus_di = 100.0 * plus_dm_sum / tr_sum
+            minus_di = 100.0 * minus_dm_sum / tr_sum
+        else:
+            plus_di = 0.0
+            minus_di = 0.0
+        
+        plus_di_list.append(plus_di)
+        minus_di_list.append(minus_di)
+        di_diff = abs(plus_di - minus_di)
+        di_sum = plus_di + minus_di if (plus_di + minus_di) > 0 else 1.0
+        di_diff_list.append(100.0 * di_diff / di_sum if di_sum > 0 else 0.0)
+    
+    # Smooth DI diff to get ADX
+    if len(di_diff_list) < period:
+        return outputs
+    
+    adx_value = mean(di_diff_list[:period])
+    outputs[period + period - 1] = adx_value
+    
+    for index in range(period, len(di_diff_list)):
+        adx_value = ((adx_value * (period - 1)) + di_diff_list[index]) / period
+        outputs[index + period] = adx_value
+    
+    return outputs
+
+
 @dataclass(frozen=True)
 class IndicatorSnapshot:
     """Computed indicator values for one finalized candle."""
@@ -176,6 +269,8 @@ class IndicatorSnapshot:
     ema_alignment: Optional[str]
     ema_cross: Optional[str]
     atr: Optional[float]
+    adx: Optional[float]
+    regime: Optional[str]
     candle_reliable: bool
 
 
@@ -208,6 +303,7 @@ class TimeframeIndicatorState:
         self.ema_fast_period = ema_fast_period
         self.ema_slow_period = ema_slow_period
         self.atr_period = atr_period
+        self.adx_period = 14  # Standard ADX period
         self._candles: list[Candle] = []
         self._latest_snapshot: Optional[IndicatorSnapshot] = None
 
@@ -247,6 +343,7 @@ class TimeframeIndicatorState:
         ema_fast = _ema_series(closes, self.ema_fast_period)
         ema_slow = _ema_series(closes, self.ema_slow_period)
         atr_values = _atr_series(highs, lows, closes, self.atr_period)
+        adx_values = _adx_series(highs, lows, closes, self.adx_period)
 
         latest_index = len(self._candles) - 1
         fast_value = ema_fast[latest_index]
@@ -274,6 +371,17 @@ class TimeframeIndicatorState:
             alignment = "neutral"
             cross = None
 
+        # Classify regime based on ADX
+        adx_value = adx_values[latest_index]
+        regime: Optional[str] = None
+        if adx_value is not None:
+            if adx_value < 25:
+                regime = "RANGING"
+            elif adx_value < 50:
+                regime = "TRENDING"
+            else:
+                regime = "STRONG_TREND"
+        
         snapshot = IndicatorSnapshot(
             symbol=self.symbol,
             timeframe=self.timeframe,
@@ -292,6 +400,8 @@ class TimeframeIndicatorState:
             ema_alignment=alignment,
             ema_cross=cross,
             atr=atr_values[latest_index],
+            adx=adx_value,
+            regime=regime,
             candle_reliable=candle.is_reliable,
         )
         self._latest_snapshot = snapshot

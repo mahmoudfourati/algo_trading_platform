@@ -211,7 +211,7 @@ class IsolationForestScorer:
 
 class HalfSpaceTreeScorer:
     def __init__(self) -> None:
-        self._model = HalfSpaceTrees(n_trees=25, height=15, window_size=250, seed=42)
+        self._model = HalfSpaceTrees(n_trees=25, height=15, window_size=1000, seed=42)
 
     def score_and_learn(self, features: Dict[str, float]) -> float:
         # Critical scoring order: score first, then learn.

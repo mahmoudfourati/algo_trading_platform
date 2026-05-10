@@ -50,6 +50,7 @@ class RiskState:
     daily_loss_halted: bool = False
     last_loss_direction: Optional[SignalDirection] = None
     last_state_reason: str = ""
+    last_approved_order: Optional[ApprovedOrder] = None
     alert_events: list[str] = field(default_factory=list)
 
 
@@ -70,6 +71,27 @@ class RiskDecision:
 DEFAULT_RISK_MANAGER_CONFIG = RiskManagerConfig()
 
 
+@dataclass
+class Layer4Telemetry:
+    """Counters describing Layer 4 decision behavior."""
+
+    market_observations: int = 0
+    state_normal: int = 0
+    state_reduced: int = 0
+    state_halted: int = 0
+    signals_evaluated: int = 0
+    approved_orders: int = 0
+    rejected_orders: int = 0
+    close_all_orders: int = 0
+    transition_normal_to_reduced: int = 0
+    transition_normal_to_halted: int = 0
+    transition_reduced_to_normal: int = 0
+    transition_reduced_to_halted: int = 0
+    transition_halted_to_normal: int = 0
+    transition_halted_to_reduced: int = 0
+    rejection_reasons: dict[str, int] = field(default_factory=dict)
+
+
 class Layer4RiskEngine:
     """Apply Layer 4 checks, size adjustments, and circuit breaker updates."""
 
@@ -78,10 +100,12 @@ class Layer4RiskEngine:
             raise ValueError("starting_equity must be positive")
         self.config = config
         self.state = RiskState(session_start_equity=starting_equity, current_equity=starting_equity, peak_equity=starting_equity)
+        self.telemetry = Layer4Telemetry()
 
     def observe_market(self, *, timestamp_utc: int, equity: float, upstream_state: SystemState) -> RiskState:
         """Refresh capital metrics and the circuit-breaker state from market context."""
 
+        previous_state = self.state.circuit_breaker_state
         self.state.current_equity = equity
         self.state.peak_equity = max(self.state.peak_equity, equity)
         self.state.latest_drawdown_pct = self._drawdown_pct(equity)
@@ -103,10 +127,12 @@ class Layer4RiskEngine:
 
         if self.state.daily_loss_halted:
             self._set_state("HALTED", "daily_loss_limit")
+            self._record_market_observation(previous_state)
             return self.state
 
         if upstream_state == "HALT":
             self._set_state("HALTED", "upstream_halt")
+            self._record_market_observation(previous_state)
             return self.state
 
         if self.state.consecutive_losing_trades >= self.config.consecutive_loss_pause_threshold:
@@ -115,6 +141,7 @@ class Layer4RiskEngine:
             self._set_state("HALTED", "loss_streak_pause")
             if self._can_recover(timestamp_utc):
                 self._recover_from_pause()
+            self._record_market_observation(previous_state)
             return self.state
 
         if self._needs_reduced_state():
@@ -123,13 +150,16 @@ class Layer4RiskEngine:
             self._set_state("REDUCED", self._reduced_reason())
             if self._can_recover(timestamp_utc):
                 self._recover_from_pause()
+            self._record_market_observation(previous_state)
             return self.state
 
         if self.state.circuit_breaker_state in {"REDUCED", "HALTED"} and self._can_recover(timestamp_utc):
             self._recover_from_pause()
+            self._record_market_observation(previous_state)
             return self.state
 
         self._set_state("NORMAL", "normal")
+        self._record_market_observation(previous_state)
         return self.state
 
     def register_closed_trade(self, *, realized_pnl_pct: float, direction: SignalDirection, timestamp_utc: int) -> RiskState:
@@ -156,6 +186,7 @@ class Layer4RiskEngine:
     ) -> RiskDecision:
         """Apply the eight pre-execution checks to a signal."""
 
+        self.telemetry.signals_evaluated += 1
         effective_timestamp = signal.timestamp_utc if timestamp_utc is None else timestamp_utc
         circuit_state = self.state.circuit_breaker_state
 
@@ -171,6 +202,7 @@ class Layer4RiskEngine:
             return self._reject("trust floor breached", circuit_state)
 
         if signal.direction == "CLOSE_ALL":
+            self.telemetry.close_all_orders += 1
             return self._build_close_all_decision(
                 signal,
                 current_portfolio_exposure_pct=current_portfolio_exposure_pct,
@@ -231,6 +263,8 @@ class Layer4RiskEngine:
             risk_adjustments=risk_adjustments,
             reason="approved" if not risk_adjustments else "; ".join(risk_adjustments),
         )
+        self.telemetry.approved_orders += 1
+        self.state.last_approved_order = order
         return RiskDecision(
             approved=True,
             circuit_breaker_state=circuit_state,
@@ -272,6 +306,7 @@ class Layer4RiskEngine:
             risk_adjustments=["close all"],
             reason="approved close all",
         )
+        self.state.last_approved_order = order
         return RiskDecision(
             approved=True,
             circuit_breaker_state=circuit_state,
@@ -340,7 +375,49 @@ class Layer4RiskEngine:
             self.state.alert_events.append(reason)
 
     def _reject(self, reason: str, circuit_state: CircuitBreakerState) -> RiskDecision:
+        self.telemetry.rejected_orders += 1
+        self.telemetry.rejection_reasons[reason] = self.telemetry.rejection_reasons.get(reason, 0) + 1
         return RiskDecision(approved=False, circuit_breaker_state=circuit_state, reason=reason, alerts=tuple(self.state.alert_events))
+
+    def _record_market_observation(self, previous_state: CircuitBreakerState) -> None:
+        current_state = self.state.circuit_breaker_state
+        self.telemetry.market_observations += 1
+        if current_state == "NORMAL":
+            self.telemetry.state_normal += 1
+        elif current_state == "REDUCED":
+            self.telemetry.state_reduced += 1
+        elif current_state == "HALTED":
+            self.telemetry.state_halted += 1
+
+        if previous_state == current_state:
+            return
+
+        transition_key = f"transition_{previous_state.lower()}_to_{current_state.lower()}"
+        if hasattr(self.telemetry, transition_key):
+            setattr(self.telemetry, transition_key, getattr(self.telemetry, transition_key) + 1)
+
+    def get_telemetry(self) -> dict[str, object]:
+        """Return a flat snapshot for reporting."""
+
+        data = {
+            "market_observations": self.telemetry.market_observations,
+            "state_normal": self.telemetry.state_normal,
+            "state_reduced": self.telemetry.state_reduced,
+            "state_halted": self.telemetry.state_halted,
+            "signals_evaluated": self.telemetry.signals_evaluated,
+            "approved_orders": self.telemetry.approved_orders,
+            "rejected_orders": self.telemetry.rejected_orders,
+            "close_all_orders": self.telemetry.close_all_orders,
+            "transition_normal_to_reduced": self.telemetry.transition_normal_to_reduced,
+            "transition_normal_to_halted": self.telemetry.transition_normal_to_halted,
+            "transition_reduced_to_normal": self.telemetry.transition_reduced_to_normal,
+            "transition_reduced_to_halted": self.telemetry.transition_reduced_to_halted,
+            "transition_halted_to_normal": self.telemetry.transition_halted_to_normal,
+            "transition_halted_to_reduced": self.telemetry.transition_halted_to_reduced,
+        }
+        for reason, count in sorted(self.telemetry.rejection_reasons.items()):
+            data[f"reject_{reason.replace(' ', '_').replace('-', '_')}"] = count
+        return data
 
 
 __all__ = [
