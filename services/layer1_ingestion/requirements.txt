@@ -2,6 +2,6 @@
 websockets==12.0
 httpx==0.27.2
 pydantic==2.9.2
-kafka-python==2.0.2
+kafka-python-ng
 prometheus-client==0.21.0
 cryptography>=42.0.0

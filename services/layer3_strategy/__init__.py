@@ -15,7 +15,6 @@ from .signals import (
     evaluate_dual_timeframe_signal,
 )
 from .sizing import PositionSizingConfig, PositionSizingResult, size_trade_signal
-from .service import Layer3Service, Layer3SymbolState, build_service
 
 __all__ = [
     "Candle",
@@ -36,7 +35,4 @@ __all__ = [
     "PositionSizingConfig",
     "PositionSizingResult",
     "size_trade_signal",
-    "Layer3Service",
-    "Layer3SymbolState",
-    "build_service",
 ]

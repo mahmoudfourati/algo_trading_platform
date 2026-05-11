@@ -288,8 +288,8 @@ class TimeframeIndicatorState:
         macd_signal_period: int = 9,
         bollinger_period: int = 20,
         bollinger_std_dev: float = 2.0,
-        ema_fast_period: int = 12,
-        ema_slow_period: int = 26,
+        ema_fast_period: int = 9,
+        ema_slow_period: int = 21,
         atr_period: int = 14,
     ) -> None:
         self.symbol = symbol

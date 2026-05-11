@@ -1,5 +1,5 @@
 # Purpose: Dependencies for the Layer 1 validated service.
-kafka-python==2.0.2
+kafka-python-ng
 pydantic==2.9.2
 prometheus-client==0.21.0
 cryptography>=42.0.0

@@ -23,16 +23,16 @@ ConfluenceLevel = Literal["FULL", "PARTIAL", "NONE"]
 class SignalThresholds:
     """Thresholds used by the Layer 3 dual-timeframe decision gate."""
 
-    long_rsi_min: float = 15.0
-    long_rsi_max: float = 55.0
-    short_rsi_min: float = 45.0
-    short_rsi_max: float = 85.0
+    long_rsi_min: float = 25.0
+    long_rsi_max: float = 45.0
+    short_rsi_min: float = 55.0
+    short_rsi_max: float = 75.0
     bollinger_buffer_pct: float = 0.01
     bollinger_strong_pct: float = 0.01
     ema_cross_window: int = 3
     ema_cross_margin_pct: float = 0.005
-    ofi_long_threshold: float = 0.20
-    ofi_short_threshold: float = 0.20
+    ofi_long_threshold: float = 0.10
+    ofi_short_threshold: float = 0.10
     higher_long_rsi_max: float = 55.0
     higher_short_rsi_min: float = 45.0
 
@@ -114,7 +114,7 @@ def evaluate_dual_timeframe_signal(
 
     if long_primary:
         confluence_count = _higher_timeframe_confluence_long(latest_higher, higher_window, thresholds)
-        if confluence_count < 1:
+        if confluence_count < 2:
             return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="higher timeframe disagreement")
         signal_strength = _signal_strength_long(latest_primary, primary_window, thresholds)
         confluence = "FULL" if confluence_count == 3 else "PARTIAL"
@@ -135,7 +135,7 @@ def evaluate_dual_timeframe_signal(
 
     if short_primary:
         confluence_count = _higher_timeframe_confluence_short(latest_higher, higher_window, thresholds)
-        if confluence_count < 1:
+        if confluence_count < 2:
             return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="higher timeframe disagreement")
         signal_strength = _signal_strength_short(latest_primary, primary_window, thresholds)
         confluence = "FULL" if confluence_count == 3 else "PARTIAL"
@@ -194,8 +194,8 @@ def _primary_long_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnap
     bollinger_ok = latest.bollinger_lower is not None and latest.close <= latest.bollinger_lower * (1.0 + thresholds.bollinger_buffer_pct)
     ema_ok = _ema_alignment_ok(recent, direction="LONG", thresholds=thresholds)
     breakdown = {"rsi_ok": rsi_ok, "macd_ok": macd_ok, "bollinger_ok": bollinger_ok, "ema_ok": ema_ok}
-    # Require: (RSI + Bollinger) AND (MACD OR EMA)
-    result = (rsi_ok and bollinger_ok) and (macd_ok or ema_ok)
+    # Blueprint: require ALL four conditions
+    result = rsi_ok and macd_ok and bollinger_ok and ema_ok
     return result, breakdown
 
 
@@ -205,8 +205,8 @@ def _primary_short_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSna
     bollinger_ok = latest.bollinger_upper is not None and latest.close >= latest.bollinger_upper * (1.0 - thresholds.bollinger_buffer_pct)
     ema_ok = _ema_alignment_ok(recent, direction="SHORT", thresholds=thresholds)
     breakdown = {"rsi_ok": rsi_ok, "macd_ok": macd_ok, "bollinger_ok": bollinger_ok, "ema_ok": ema_ok}
-    # Require: (RSI + Bollinger) AND (MACD OR EMA)
-    result = (rsi_ok and bollinger_ok) and (macd_ok or ema_ok)
+    # Blueprint: require ALL four conditions
+    result = rsi_ok and macd_ok and bollinger_ok and ema_ok
     return result, breakdown
 
 
@@ -216,8 +216,10 @@ def _histogram_trending_up(recent: Sequence[IndicatorSnapshot], *, direction: st
     if latest.macd_histogram is None or previous is None or previous.macd_histogram is None:
         return False
     if direction == "LONG":
-        return latest.macd_histogram > 0.0 and latest.macd_histogram > previous.macd_histogram
-    return latest.macd_histogram < 0.0 and latest.macd_histogram < previous.macd_histogram
+        return (latest.macd_histogram > 0.0 and latest.macd_histogram > previous.macd_histogram) or \
+               (previous.macd_histogram < 0.0 and latest.macd_histogram >= 0.0)
+    return (latest.macd_histogram < 0.0 and latest.macd_histogram < previous.macd_histogram) or \
+           (previous.macd_histogram > 0.0 and latest.macd_histogram <= 0.0)
 
 
 def _ema_alignment_ok(recent: Sequence[IndicatorSnapshot], *, direction: str, thresholds: SignalThresholds) -> bool:
