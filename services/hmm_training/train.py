@@ -120,7 +120,7 @@ def main(argv: List[str] | None = None) -> int:
     if len(vol_all) < 50:
         raise SystemExit(f"Not enough data points to train HMM (got {len(vol_all)})")
 
-    model, order, means = train_gaussian_hmm(vol_all, n_states=2, seed=42)
+    model, order, means = train_gaussian_hmm(vol_all, n_states=3, seed=42)
 
     meta = TrainingMetadata(
         symbols=symbols,
@@ -128,7 +128,7 @@ def main(argv: List[str] | None = None) -> int:
         days=args.days,
         end_date=args.end_date,
         points=len(vol_all),
-        n_states=2,
+        n_states=3,
         regime_order_by_mean=order,
         regime_means=means,
     )

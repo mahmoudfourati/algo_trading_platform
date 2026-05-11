@@ -17,12 +17,53 @@ import os
 import time
 from pathlib import Path
 from kafka import KafkaConsumer
+from prometheus_client import Counter, Gauge, Histogram
 
 from services.layer1_validated.kafka_json_publisher import KafkaJsonPublisher, KafkaJsonPublisherConfig
 from shared.audit import emit_audit_event
 from shared.metrics_http import start_metrics_http_server
 from shared.service_health import mark_service_healthy
 from services.layer5_execution.engine import ExecutionEngine
+
+
+# === PROMETHEUS METRICS ===
+
+# Throughput
+_orders_in_total = Counter("layer5_orders_in_total", "Approved orders consumed.")
+_bad_in_total = Counter("layer5_bad_in_total", "Orders that failed validation.")
+_orders_placed_total = Counter("layer5_orders_placed_total", "Orders placed to exchange.", ["exchange_id", "symbol", "direction"])
+_orders_filled_total = Counter("layer5_orders_filled_total", "Orders fully filled.", ["exchange_id", "symbol", "direction"])
+_orders_partial_filled_total = Counter("layer5_orders_partial_filled_total", "Orders partially filled.", ["exchange_id", "symbol"])
+_orders_failed_total = Counter("layer5_orders_failed_total", "Orders failed.", ["exchange_id", "symbol", "reason"])
+
+# Execution Quality
+_fill_rate_pct = Gauge("execution_fill_rate_percent", "Fill rate percentage (filled/placed).", ["symbol"])
+_slippage_abs_bps = Histogram(
+    "execution_slippage_abs_bps",
+    "Absolute execution slippage magnitude in basis points.",
+    ["symbol", "direction"],
+    buckets=[1, 2, 5, 10, 20, 50, 100, 200]
+)
+_slippage_signed_bps = Gauge(
+    "execution_slippage_signed_bps",
+    "Signed execution slippage in basis points (negative=favorable fill).",
+    ["symbol", "direction"]
+)
+_execution_latency_ms = Histogram(
+    "execution_order_placement_latency_ms",
+    "Order placement latency to exchange.",
+    ["exchange_id"],
+    buckets=[1, 5, 10, 20, 50, 100, 200, 500, 1000]
+)
+
+# Retries & Failures
+_order_retries_total = Counter("execution_order_retries_total", "Order retry attempts.", ["exchange_id", "reason"])
+_idempotency_dedup_hits = Counter("execution_idempotency_dedup_hits_total", "Idempotency deduplication hits.", ["exchange_id"])
+_reconciliation_failures = Counter("execution_reconciliation_failures_total", "Reconciliation failures.", ["exchange_id"])
+
+# State
+_pending_orders = Gauge("execution_pending_orders_count", "Current pending orders count.", ["symbol"])
+_wal_depth = Gauge("execution_wal_depth", "Write-ahead log depth (unacknowledged orders).")
 
 
 class Layer5Service:
@@ -59,35 +100,96 @@ class Layer5Service:
         else:
             raise ValueError(f"Unknown adapter type: {adapter_type}")
         
-        self.engine = ExecutionEngine(adapter=adapter, portfolio_value=float(os.getenv("PORTFOLIO_VALUE", "1.0")), persistence_db=persistence_db)
+        self.engine = ExecutionEngine(adapter=adapter, portfolio_value=float(os.getenv("PORTFOLIO_VALUE", "1.0")), persistence_db=persistence_db, publisher=self.publisher)
 
     def run_forever(self) -> None:
         emit_audit_event("layer5.start", source="layer5_execution", payload={"approved_topic": os.getenv("KAFKA_APPROVED_TOPIC", "trading.orders.approved"), "executed_topic": self.publisher.topic})
+        
+        # Determine exchange_id for metrics
+        adapter_type = os.getenv("EXECUTION_ADAPTER_TYPE", "simulated").lower()
+        exchange_id = "binance" if adapter_type == "binance" else "simulated"
+        
         try:
             for msg in self.consumer:
+                _orders_in_total.inc()
+                
                 try:
                     raw = json.loads(msg.value.decode("utf-8"))
                 except Exception as exc:
+                    _bad_in_total.inc()
                     emit_audit_event("layer5.bad_approved", source="layer5_execution", payload={"error": repr(exc)})
                     continue
 
+                symbol = raw.get("symbol", "UNKNOWN")
+                direction = raw.get("direction", "UNKNOWN")
+                
                 try:
+                    start_time = time.perf_counter()
                     executed = self.engine.submit_order(raw, reference_price=raw.get("entry_price"))
+                    execution_ms = (time.perf_counter() - start_time) * 1000
+                    _execution_latency_ms.labels(exchange_id=exchange_id).observe(execution_ms)
+                    
                 except Exception as exc:
+                    _orders_failed_total.labels(exchange_id=exchange_id, symbol=symbol, reason="exception").inc()
                     emit_audit_event("layer5.execution_failed", source="layer5_execution", payload={"error": repr(exc), "order": raw})
                     # if engine/store marked it failed and moved to DLQ, we simply continue here
                     continue
 
+                # Track order placement
+                _orders_placed_total.labels(exchange_id=exchange_id, symbol=symbol, direction=direction).inc()
+                
+                # Determine order status from execution result
+                if executed.note and "REJECTED" in executed.note:
+                    status = "REJECTED"
+                    _orders_failed_total.labels(exchange_id=exchange_id, symbol=symbol, reason="rejected").inc()
+                elif executed.note and "CANCELLED" in executed.note:
+                    status = "CANCELLED"
+                    _orders_failed_total.labels(exchange_id=exchange_id, symbol=symbol, reason="cancelled").inc()
+                elif executed.filled_pct >= 1.0:
+                    status = "FILLED"
+                    _orders_filled_total.labels(exchange_id=exchange_id, symbol=symbol, direction=direction).inc()
+                elif executed.filled_pct > 0.0:
+                    status = "PARTIALLY_FILLED"
+                    _orders_partial_filled_total.labels(exchange_id=exchange_id, symbol=symbol).inc()
+                else:
+                    status = "PENDING"
+                
+                # Track slippage (in basis points)
+                if executed.avg_fill_price > 0.0 and raw.get("entry_price"):
+                    entry_price = float(raw.get("entry_price"))
+                    slippage_bps = ((executed.avg_fill_price - entry_price) / entry_price) * 10000
+                    
+                    # Track absolute magnitude for histogram
+                    _slippage_abs_bps.labels(symbol=symbol, direction=direction).observe(abs(slippage_bps))
+                    
+                    # Track signed value for gauge (negative = favorable fill)
+                    _slippage_signed_bps.labels(symbol=symbol, direction=direction).set(slippage_bps)
+                
+                # Calculate filled_size as absolute quantity
+                # filled_size = filled_pct * size_pct * portfolio_value / filled_price
+                portfolio_value = self.engine.portfolio_value
+                size_pct = raw.get("size_pct", 0.0)
+                filled_size = 0.0
+                if executed.avg_fill_price > 0.0:
+                    filled_size = (executed.filled_pct * size_pct * portfolio_value) / executed.avg_fill_price
+                
                 out = {
                     "order_id": executed.order_id,
-                    "filled_pct": executed.filled_pct,
-                    "avg_fill_price": executed.avg_fill_price,
-                    "fee_paid": executed.fee_paid,
-                    "slippage_pct": executed.slippage_pct,
-                    "note": executed.note,
+                    "symbol": raw.get("symbol", ""),
+                    "direction": raw.get("direction", ""),
+                    "filled_price": executed.avg_fill_price,
+                    "filled_size": filled_size,
+                    "status": status,
+                    "timestamp_utc": int(time.time() * 1000),
                 }
                 self.publisher.publish(out)
                 emit_audit_event("layer5.order_executed", source="layer5_execution", payload={"order_id": executed.order_id})
+                
+                # Update WAL depth if persistence is enabled
+                if self.engine.store is not None:
+                    pending_count = len(self.engine.store.fetch_pending())
+                    _wal_depth.set(pending_count)
+                
         finally:
             self.publisher.stop()
             self.consumer.close()

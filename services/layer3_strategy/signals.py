@@ -15,7 +15,7 @@ from .indicators import IndicatorSnapshot
 from .ofi import OrderFlowImbalanceSnapshot
 
 
-SignalDirection = Literal["LONG", "SHORT", "HOLD"]
+SignalDirection = Literal["LONG", "SHORT", "HOLD", "CLOSE_ALL"]
 ConfluenceLevel = Literal["FULL", "PARTIAL", "NONE"]
 
 
@@ -23,10 +23,12 @@ ConfluenceLevel = Literal["FULL", "PARTIAL", "NONE"]
 class SignalThresholds:
     """Thresholds used by the Layer 3 dual-timeframe decision gate."""
 
-    long_rsi_min: float = 25.0
-    long_rsi_max: float = 45.0
-    short_rsi_min: float = 55.0
-    short_rsi_max: float = 75.0
+    # State-dependent RSI thresholds
+    normal_rsi_long: float = 35.0
+    normal_rsi_short: float = 65.0
+    conservative_rsi_long: float = 30.0
+    conservative_rsi_short: float = 70.0
+    
     bollinger_buffer_pct: float = 0.01
     bollinger_strong_pct: float = 0.01
     ema_cross_window: int = 3
@@ -95,8 +97,11 @@ def evaluate_dual_timeframe_signal(
         },
     }
 
-    if system_state in {"HALT", "DEGRADED"}:
-        return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason=f"system_state={system_state}")
+    if system_state == "HALT":
+        return _close_all_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="system_state=HALT")
+    
+    if system_state == "DEGRADED":
+        return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="system_state=DEGRADED")
 
     if not latest_primary.candle_reliable:
         return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="primary candle not reliable")
@@ -104,8 +109,8 @@ def evaluate_dual_timeframe_signal(
     primary_window = list(primary_snapshots[-thresholds.ema_cross_window :])
     higher_window = list(higher_snapshots[-2:])
 
-    long_primary, long_breakdown = _primary_long_gate(latest_primary, primary_window, thresholds)
-    short_primary, short_breakdown = _primary_short_gate(latest_primary, primary_window, thresholds)
+    long_primary, long_breakdown = _primary_long_gate(latest_primary, primary_window, thresholds, system_state)
+    short_primary, short_breakdown = _primary_short_gate(latest_primary, primary_window, thresholds, system_state)
 
     if long_primary and ofi_snapshot.ofi <= thresholds.ofi_long_threshold:
         return _hold_signal(symbol=symbol, ofi=ofi_snapshot.ofi, trust_score=trust_score, system_state=system_state, reason="OFI long gate failed")
@@ -188,8 +193,37 @@ def _hold_signal(
     )
 
 
-def _primary_long_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnapshot], thresholds: SignalThresholds) -> tuple[bool, dict[str, bool]]:
-    rsi_ok = latest.rsi is not None and thresholds.long_rsi_min <= latest.rsi <= thresholds.long_rsi_max
+def _close_all_signal(
+    *,
+    symbol: str,
+    ofi: float,
+    system_state: SystemState,
+    trust_score: float = 1.0,
+    reason: str,
+    timestamp_utc: int = 0,
+    indicator_snapshots: dict[str, dict[str, object]] | None = None,
+    candle_reliability: dict[str, bool] | None = None,
+) -> TradeSignal:
+    return TradeSignal(
+        symbol=symbol,
+        direction="CLOSE_ALL",
+        size_pct=0.0,
+        signal_strength=0.0,
+        confluence="NONE",
+        ofi=ofi,
+        system_state=system_state,
+        timestamp_utc=timestamp_utc,
+        indicator_snapshots=indicator_snapshots or {},
+        candle_reliability=candle_reliability or {},
+        trust_score=trust_score,
+        reason=reason,
+    )
+
+
+def _primary_long_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnapshot], thresholds: SignalThresholds, system_state: SystemState) -> tuple[bool, dict[str, bool]]:
+    # State-dependent RSI threshold: NORMAL uses 35, CONSERVATIVE uses 30
+    rsi_threshold = thresholds.conservative_rsi_long if system_state == "CONSERVATIVE" else thresholds.normal_rsi_long
+    rsi_ok = latest.rsi is not None and latest.rsi < rsi_threshold
     macd_ok = _histogram_trending_up(recent, direction="LONG")
     bollinger_ok = latest.bollinger_lower is not None and latest.close <= latest.bollinger_lower * (1.0 + thresholds.bollinger_buffer_pct)
     ema_ok = _ema_alignment_ok(recent, direction="LONG", thresholds=thresholds)
@@ -199,8 +233,10 @@ def _primary_long_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnap
     return result, breakdown
 
 
-def _primary_short_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnapshot], thresholds: SignalThresholds) -> tuple[bool, dict[str, bool]]:
-    rsi_ok = latest.rsi is not None and thresholds.short_rsi_min <= latest.rsi <= thresholds.short_rsi_max
+def _primary_short_gate(latest: IndicatorSnapshot, recent: Sequence[IndicatorSnapshot], thresholds: SignalThresholds, system_state: SystemState) -> tuple[bool, dict[str, bool]]:
+    # State-dependent RSI threshold: NORMAL uses 65, CONSERVATIVE uses 70
+    rsi_threshold = thresholds.conservative_rsi_short if system_state == "CONSERVATIVE" else thresholds.normal_rsi_short
+    rsi_ok = latest.rsi is not None and latest.rsi > rsi_threshold
     macd_ok = _histogram_trending_up(recent, direction="SHORT")
     bollinger_ok = latest.bollinger_upper is not None and latest.close >= latest.bollinger_upper * (1.0 - thresholds.bollinger_buffer_pct)
     ema_ok = _ema_alignment_ok(recent, direction="SHORT", thresholds=thresholds)

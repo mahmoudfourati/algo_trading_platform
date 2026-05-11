@@ -18,6 +18,7 @@ from pathlib import Path
 
 from services.layer5_execution.adapters import DuplicateOrderError, SimulatedExecutionAdapter, SimulatedFillResult, OrderStatusResult
 from services.layer5_execution.persistence import OrderStore, PersistedOrder
+from shared.audit import emit_audit_event
 
 
 @dataclass
@@ -65,7 +66,7 @@ class ExecutionEngine:
     tolerates mappings and extracts commonly used fields.
     """
 
-    def __init__(self, *, adapter: Optional[SimulatedExecutionAdapter] = None, portfolio_value: float = 1.0, persistence_db: Optional[Path] = None) -> None:
+    def __init__(self, *, adapter: Optional[SimulatedExecutionAdapter] = None, portfolio_value: float = 1.0, persistence_db: Optional[Path] = None, publisher: Optional[object] = None) -> None:
         self.adapter = adapter or SimulatedExecutionAdapter()
         self.portfolio_value = float(portfolio_value)
         self._orders: Dict[str, OrderRecord] = {}
@@ -74,6 +75,7 @@ class ExecutionEngine:
         self.session_id = uuid.uuid4().hex
         self._rand = random.Random(42)
         self.telemetry = ExecutionTelemetry()
+        self.publisher = publisher  # Kafka publisher for notifications
 
         # persistence
         self.store: Optional[OrderStore] = OrderStore(persistence_db) if persistence_db is not None else None
@@ -240,6 +242,72 @@ class ExecutionEngine:
                 if str(payload.get("direction", "")) == "CLOSE_ALL":
                     self.telemetry.close_all_orders += 1
                 executed = self._send_to_adapter_and_record(payload, reference_price=reference_price if reference_price is not None else entry_price)
+                
+                # Poll order status until terminal state is reached
+                # Terminal states: FILLED, CANCELLED, REJECTED
+                max_poll_attempts = 60  # 60 seconds max polling time
+                poll_interval = 1.0  # 1 second between polls
+                poll_attempt = 0
+                
+                while poll_attempt < max_poll_attempts:
+                    status = self._query_adapter_status(client_order_id)
+                    if status is None:
+                        # No status available, assume order completed successfully
+                        break
+                    
+                    # Check for terminal states
+                    if status.status in {"FILLED", "CANCELLED", "REJECTED"}:
+                        if status.status == "REJECTED":
+                            # Log rejection and notify Layer 4
+                            rejection_reason = status.note or "unknown reason"
+                            print(f"[Layer5] Order {client_order_id} REJECTED: {rejection_reason}")
+                            
+                            # Publish rejection notification to Kafka for Layer 4 feedback
+                            if self.publisher is not None:
+                                rejection_event = {
+                                    "order_id": client_order_id,
+                                    "status": "REJECTED",
+                                    "filled_pct": 0.0,
+                                    "avg_fill_price": 0.0,
+                                    "fee_paid": 0.0,
+                                    "slippage_pct": 0.0,
+                                    "note": f"REJECTED: {rejection_reason}",
+                                    "symbol": symbol,
+                                    "direction": direction,
+                                }
+                                try:
+                                    self.publisher.publish(rejection_event)
+                                except Exception as pub_exc:
+                                    print(f"[Layer5] Failed to publish rejection notification: {pub_exc}")
+                            
+                            # Update execution record
+                            executed = ExecutedOrder(
+                                order_id=client_order_id,
+                                filled_pct=0.0,
+                                avg_fill_price=0.0,
+                                fee_paid=0.0,
+                                slippage_pct=0.0,
+                                note=f"REJECTED: {rejection_reason}"
+                            )
+                            self._executions[client_order_id] = executed
+                        elif status.status == "CANCELLED":
+                            # Update execution record for cancelled order
+                            executed = ExecutedOrder(
+                                order_id=client_order_id,
+                                filled_pct=status.filled_pct,
+                                avg_fill_price=status.avg_fill_price,
+                                fee_paid=status.fee_paid,
+                                slippage_pct=0.0,
+                                note="CANCELLED"
+                            )
+                            self._executions[client_order_id] = executed
+                        # Terminal state reached, exit polling loop
+                        break
+                    
+                    # Not terminal, wait and poll again
+                    time.sleep(poll_interval)
+                    poll_attempt += 1
+                
                 return executed
             except Exception as exc:
                 last_exc = exc
@@ -256,6 +324,20 @@ class ExecutionEngine:
                     if self.store is not None:
                         try:
                             self.store.mark_failed(client_order_id)
+                            # Emit critical alert for DLQ write
+                            emit_audit_event(
+                                "layer5.order_dlq_critical",
+                                source="layer5_execution",
+                                severity="CRITICAL",
+                                payload={
+                                    "client_order_id": client_order_id,
+                                    "symbol": symbol,
+                                    "direction": direction,
+                                    "size_pct": approved_size,
+                                    "error": repr(last_exc),
+                                    "retry_attempts": max_attempts,
+                                }
+                            )
                         except Exception:
                             pass
                     raise

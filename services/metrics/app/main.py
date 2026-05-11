@@ -8,6 +8,7 @@ import time
 
 from fastapi import FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
+from shared.service_health import set_operational_mode_from_env
 
 
 app = FastAPI(title="metrics-service")
@@ -24,6 +25,9 @@ service_uptime_seconds = Gauge(
     "service_uptime_seconds",
     "Service uptime in seconds",
 )
+
+# Initialize operational mode from environment on startup
+set_operational_mode_from_env()
 
 
 @app.middleware("http")
@@ -46,3 +50,4 @@ def root() -> dict:
         "metrics": "/metrics",
         "port": int(os.getenv("METRICS_SERVICE_PORT", "9100")),
     }
+

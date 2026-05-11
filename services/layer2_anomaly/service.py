@@ -372,7 +372,7 @@ def build_service() -> Layer2Service:
 
     gate = DecisionGate(
         trust_threshold=float(os.getenv("L2_TRUST_THRESHOLD", "0.60")),
-        anomaly_threshold=float(os.getenv("L2_ANOMALY_THRESHOLD", "0.80")),
+        anomaly_threshold=float(os.getenv("L2_ANOMALY_THRESHOLD", "0.55")),
         upgrade_streak_required=int(os.getenv("L2_UPGRADE_STREAK", "10")),
     )
 

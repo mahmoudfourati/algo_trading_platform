@@ -211,7 +211,7 @@ class IsolationForestScorer:
 
 class HalfSpaceTreeScorer:
     def __init__(self) -> None:
-        self._model = HalfSpaceTrees(n_trees=25, height=15, window_size=1000, seed=42)
+        self._model = HalfSpaceTrees(n_trees=25, height=15, window_size=250, seed=42)
 
     def score_and_learn(self, features: Dict[str, float]) -> float:
         # Critical scoring order: score first, then learn.
@@ -329,7 +329,7 @@ class Layer2ScoringEngine:
 
         # MAD guard on raw return (2-state model: normal vol regime 0, high vol regime 1).
         mad = self._feat.mad_f1()
-        k = {0: 4.0, 1: 8.0}.get(regime.regime, 4.0)
+        k = {0: 3.0, 1: 5.0, 2: 8.0}.get(regime.regime, 4.0)
         mad_guard_triggered = bool(mad > 0.0 and abs(f1_raw) > (k * mad))
 
         if mad_guard_triggered:
