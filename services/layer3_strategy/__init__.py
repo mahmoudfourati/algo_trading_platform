@@ -1,7 +1,6 @@
 """Layer 3 strategy package with candle, bootstrap, and indicator helpers."""
 
 from .candles import Candle, CandleAggregationEvent, CandleAggregationManager, CandleAggregator
-from .feature_flags import Layer3FeatureFlags, load_layer3_feature_flags
 from .indicators import (
     IndicatorManager,
     IndicatorSnapshot,
@@ -21,8 +20,6 @@ __all__ = [
     "CandleAggregationEvent",
     "CandleAggregationManager",
     "CandleAggregator",
-    "Layer3FeatureFlags",
-    "load_layer3_feature_flags",
     "IndicatorManager",
     "IndicatorSnapshot",
     "TimeframeIndicatorState",

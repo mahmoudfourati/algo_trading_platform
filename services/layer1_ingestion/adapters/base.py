@@ -13,12 +13,41 @@ from dataclasses import dataclass
 from typing import AsyncIterator, Iterable, Optional
 
 import httpx
+from prometheus_client import Counter, Gauge, Histogram
 
 from shared.audit import emit_audit_event
 from shared.schemas import NormalizedTick
 from shared.tls_pinning import verify_spki_pin, days_until_cert_expiry, pins_path_from_env
 from shared.tls_health_registry import get_tls_health_registry
 from pathlib import Path
+
+
+# === PHASE 3: LAYER 1 INGESTION METRICS ===
+
+_websocket_reconnects = Counter(
+    "exchange_websocket_reconnects_total",
+    "WebSocket reconnection count",
+    ["exchange_id", "reason"]  # reason = timeout|tls_fail|heartbeat|error|stream_end
+)
+
+_websocket_connection_duration = Histogram(
+    "exchange_websocket_connection_duration_seconds",
+    "WebSocket connection duration before disconnect",
+    ["exchange_id"],
+    buckets=[1, 5, 10, 30, 60, 300, 600, 1800, 3600, 7200]
+)
+
+_tls_verification_failures = Counter(
+    "tls_verification_failures_total",
+    "TLS verification failures by exchange",
+    ["exchange_id", "reason"]  # reason = spki_mismatch|timeout|no_pin|error
+)
+
+_exchange_health_status = Gauge(
+    "exchange_connection_health",
+    "Exchange connection health (1=healthy, 0=unhealthy)",
+    ["exchange_id"]
+)
 
 
 class HeartbeatTimeout(Exception):
@@ -61,6 +90,9 @@ class BaseWsAdapter(ABC):
         backoff = self._config.backoff_initial_s
         first = True
         while True:
+            connection_start_time = time.time()
+            disconnect_reason = "unknown"
+            
             try:
                 if not first:
                     await self._fetch_rest_snapshot_safe()
@@ -79,6 +111,7 @@ class BaseWsAdapter(ABC):
                 
                 if tls_success:
                     self._tls_registry.mark_healthy(self.exchange_id)
+                    _exchange_health_status.labels(exchange_id=self.exchange_id).set(1)
                     emit_audit_event(
                         "adapter_tls_pin_verified",
                         source=self.exchange_id,
@@ -86,6 +119,23 @@ class BaseWsAdapter(ABC):
                     )
                 else:
                     self._tls_registry.mark_unhealthy(self.exchange_id, reason=tls_reason)
+                    _exchange_health_status.labels(exchange_id=self.exchange_id).set(0)
+                    
+                    # Parse TLS failure reason for metrics
+                    if "spki_mismatch" in tls_reason:
+                        tls_metric_reason = "spki_mismatch"
+                    elif "timeout" in tls_reason or "timed out" in tls_reason:
+                        tls_metric_reason = "timeout"
+                    elif "no_pin" in tls_reason:
+                        tls_metric_reason = "no_pin"
+                    else:
+                        tls_metric_reason = "error"
+                    
+                    _tls_verification_failures.labels(
+                        exchange_id=self.exchange_id,
+                        reason=tls_metric_reason
+                    ).inc()
+                    
                     emit_audit_event(
                         "adapter_tls_pin_failed",
                         source=self.exchange_id,
@@ -121,18 +171,43 @@ class BaseWsAdapter(ABC):
                         tick = tick.model_copy(update={"tls_ok": current_tls_ok})
                     yield tick
                 # If stream ends without exception, treat as disconnect.
+                disconnect_reason = "stream_end"
                 raise ConnectionError("WebSocket stream ended")
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except HeartbeatTimeout as exc:
+                disconnect_reason = "heartbeat"
                 emit_audit_event(
                     "adapter_disconnect",
                     source=self.exchange_id,
-                    payload={"error": repr(exc), "backoff_s": backoff},
+                    payload={"error": repr(exc), "backoff_s": backoff, "reason": "heartbeat"},
                 )
-                jitter = random.uniform(0.0, 0.25)
-                await asyncio.sleep(min(self._config.backoff_max_s, backoff) + jitter)
-                backoff = min(self._config.backoff_max_s, backoff * 2.0)
+            except Exception as exc:  # noqa: BLE001
+                # Classify disconnect reason
+                exc_str = str(exc).lower()
+                if "timeout" in exc_str or "timed out" in exc_str:
+                    disconnect_reason = "timeout"
+                elif "tls" in exc_str or "ssl" in exc_str or "certificate" in exc_str:
+                    disconnect_reason = "tls_fail"
+                else:
+                    disconnect_reason = "error"
+                
+                emit_audit_event(
+                    "adapter_disconnect",
+                    source=self.exchange_id,
+                    payload={"error": repr(exc), "backoff_s": backoff, "reason": disconnect_reason},
+                )
+            finally:
+                # Track connection duration and reconnect
+                connection_duration = time.time() - connection_start_time
+                _websocket_connection_duration.labels(exchange_id=self.exchange_id).observe(connection_duration)
+                _websocket_reconnects.labels(exchange_id=self.exchange_id, reason=disconnect_reason).inc()
+                _exchange_health_status.labels(exchange_id=self.exchange_id).set(0)
+            
+            # Backoff before reconnect
+            jitter = random.uniform(0.0, 0.25)
+            await asyncio.sleep(min(self._config.backoff_max_s, backoff) + jitter)
+            backoff = min(self._config.backoff_max_s, backoff * 2.0)
 
     async def _fetch_rest_snapshot_safe(self) -> None:
         try:

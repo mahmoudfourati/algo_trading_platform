@@ -228,6 +228,13 @@ class Layer2Scores:
     mad_guard_triggered: bool
     regime: int
     regime_posterior: List[float]
+    # Feature vector for observability
+    feature_raw_return: float = 0.0
+    feature_rolling_vol: float = 0.0
+    feature_spread_z: float = 0.0
+    feature_latency_z: float = 0.0  # Not yet implemented
+    feature_volume_z: float = 0.0
+    feature_trust_degradation: float = 0.0
 
 
 class Layer2ScoringEngine:
@@ -241,7 +248,7 @@ class Layer2ScoringEngine:
     ) -> None:
         self._feat = RollingFeatureWindow(maxlen=500)
         self._rv = RollingRV30m()
-        self._hmm = HMMRegimeClassifier(model_path=hmm_model_path, expected_states=2)
+        self._hmm = HMMRegimeClassifier(model_path=hmm_model_path, expected_states=3)
         self._if = IsolationForestScorer()
         self._hst = HalfSpaceTreeScorer()
 
@@ -337,6 +344,12 @@ class Layer2ScoringEngine:
             mad_guard_triggered=mad_guard_triggered,
             regime=int(regime.regime),
             regime_posterior=regime.posterior,
+            feature_raw_return=float(f1_raw),
+            feature_rolling_vol=float(rv_30m),
+            feature_spread_z=float(f3),
+            feature_latency_z=0.0,  # Not yet implemented
+            feature_volume_z=float(f2),
+            feature_trust_degradation=float(trust_score),
         )
 
 

@@ -17,6 +17,7 @@ from prometheus_client import Counter
 from shared.schemas import NormalizedTick
 
 from shared.metrics_http import start_metrics_http_server
+from shared.service_health import mark_service_healthy
 
 from .adapters.binance import BinanceAdapter
 from .adapters.bybit import BybitAdapter
@@ -91,6 +92,7 @@ async def _print_and_publish_ticks(
 
 async def main() -> None:
     start_metrics_http_server(port=int(os.getenv("METRICS_PORT", "9101")))
+    mark_service_healthy("layer1_ingestion", "layer1")
 
     args = _parse_args()
     symbols = _parse_csv(args.symbols) if args.symbols else _symbols()

@@ -12,11 +12,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from kafka import KafkaConsumer
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 from services.layer1_validated.kafka_json_publisher import KafkaJsonPublisher, KafkaJsonPublisherConfig
 from shared.audit import emit_audit_event
 from shared.metrics_http import start_metrics_http_server
+from shared.service_health import mark_service_healthy
 from shared.schemas import ScoredTick, ValidatedTick
 
 from .engine import DecisionGate, Layer2ScoringEngine
@@ -44,6 +45,119 @@ _last_state = Gauge(
 
 _STATE_NUM = {"NORMAL": 0.0, "CONSERVATIVE": 1.0, "DEGRADED": 2.0, "HALT": 3.0}
 
+# === PHASE 2: ANOMALY SCORE DECOMPOSITION ===
+
+_anomaly_if_score = Gauge(
+    "anomaly_subscore_if",
+    "Isolation Forest anomaly subscore [0,1]",
+    ["symbol"]
+)
+
+_anomaly_hst_score = Gauge(
+    "anomaly_subscore_hst",
+    "Half-Space Trees anomaly subscore [0,1]",
+    ["symbol"]
+)
+
+_anomaly_mad_triggered = Gauge(
+    "anomaly_mad_guard_active",
+    "MAD guard activation state (1=active, 0=inactive)",
+    ["symbol"]
+)
+
+_anomaly_fused_score = Gauge(
+    "anomaly_fused_score",
+    "Final fused anomaly score [0,1]",
+    ["symbol"]
+)
+
+_hmm_regime_state = Gauge(
+    "hmm_regime_state",
+    "Current HMM regime state (0=low_vol, 1=normal, 2=high_vol)",
+    ["symbol"]
+)
+
+_hmm_regime_posterior = Gauge(
+    "hmm_regime_posterior_prob",
+    "HMM posterior probability for each regime",
+    ["symbol", "regime"]
+)
+
+_hmm_regime_transitions = Counter(
+    "hmm_regime_transitions_total",
+    "Total regime transitions",
+    ["symbol", "from_regime", "to_regime"]
+)
+
+_feature_raw_return = Gauge(
+    "anomaly_feature_raw_return",
+    "Feature: raw log return",
+    ["symbol"]
+)
+
+_feature_rolling_vol = Gauge(
+    "anomaly_feature_rolling_volatility",
+    "Feature: rolling volatility (30m RV)",
+    ["symbol"]
+)
+
+_feature_spread_divergence = Gauge(
+    "anomaly_feature_spread_divergence",
+    "Feature: spread divergence z-score",
+    ["symbol"]
+)
+
+_feature_latency_anomaly = Gauge(
+    "anomaly_feature_latency_anomaly",
+    "Feature: latency anomaly z-score",
+    ["symbol"]
+)
+
+_feature_volume_anomaly = Gauge(
+    "anomaly_feature_volume_anomaly",
+    "Feature: volume anomaly z-score",
+    ["symbol"]
+)
+
+_feature_trust_degradation = Gauge(
+    "anomaly_feature_trust_degradation",
+    "Feature: trust degradation signal",
+    ["symbol"]
+)
+
+_model_inference_latency = Histogram(
+    "anomaly_model_inference_duration_ms",
+    "Model inference latency in milliseconds",
+    ["model"],
+    buckets=[0.1, 0.5, 1, 2, 5, 10, 20, 50, 100]
+)
+
+_feature_extraction_latency = Histogram(
+    "anomaly_feature_extraction_duration_ms",
+    "Feature extraction latency in milliseconds",
+    ["symbol"],
+    buckets=[0.1, 0.5, 1, 2, 5, 10]
+)
+
+_anomaly_score_histogram = Histogram(
+    "anomaly_score_distribution",
+    "Anomaly score distribution",
+    ["symbol"],
+    buckets=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0]
+)
+
+_decision_gate_transitions = Counter(
+    "decision_gate_state_transitions_total",
+    "Decision gate state transitions",
+    ["from_state", "to_state"]
+)
+
+_decision_gate_trigger_reason = Counter(
+    "decision_gate_trigger_total",
+    "Decision gate trigger events by reason",
+    ["trigger"]
+)
+
 
 @dataclass
 class Layer2Service:
@@ -54,6 +168,8 @@ class Layer2Service:
     missing_data_timeout_s: float = 30.0
     _last_valid_tick_s: float = field(default_factory=time.monotonic, init=False, repr=False)
     _watchdog_in_halt: bool = field(default=False, init=False, repr=False)
+    _last_regime: dict[str, int] = field(default_factory=dict, init=False, repr=False)  # Phase 2
+    _last_gate_state: dict[str, str] = field(default_factory=dict, init=False, repr=False)  # Phase 2
 
     def _enter_watchdog_halt(self, *, now_s: float) -> None:
         if self._watchdog_in_halt:
@@ -95,6 +211,8 @@ class Layer2Service:
             )
             self.engine_by_symbol[tick.symbol] = scorer
 
+        # === PHASE 2: TIMING MODEL INFERENCE ===
+        start_time = time.perf_counter()
         scores = scorer.score_tick(
             symbol=tick.symbol,
             ts_ms=int(tick.timestamp_utc),
@@ -103,6 +221,8 @@ class Layer2Service:
             volume_24h=tick.volume_24h,
             spread=tick.spread,
         )
+        total_inference_ms = (time.perf_counter() - start_time) * 1000
+        _model_inference_latency.labels(model="total_scoring").observe(total_inference_ms)
 
         prev_state = self.gate.state
         system_state = self.gate.update(trust=float(tick.trust_score), anomaly=float(scores.anomaly_score))
@@ -115,6 +235,49 @@ class Layer2Service:
         _last_input_lag_ms.labels(symbol=tick.symbol).set(
             max(0.0, float(int(time.time() * 1000) - int(tick.timestamp_utc)))
         )
+        
+        # === PHASE 2: ANOMALY SCORE DECOMPOSITION METRICS ===
+        _anomaly_if_score.labels(symbol=tick.symbol).set(float(scores.if_score))
+        _anomaly_hst_score.labels(symbol=tick.symbol).set(float(scores.hst_score))
+        _anomaly_mad_triggered.labels(symbol=tick.symbol).set(1.0 if scores.mad_guard_triggered else 0.0)
+        _anomaly_fused_score.labels(symbol=tick.symbol).set(float(scores.anomaly_score))
+        _anomaly_score_histogram.labels(symbol=tick.symbol).observe(float(scores.anomaly_score))
+        
+        # HMM Regime tracking
+        _hmm_regime_state.labels(symbol=tick.symbol).set(int(scores.regime))
+        for i, prob in enumerate(scores.regime_posterior):
+            _hmm_regime_posterior.labels(symbol=tick.symbol, regime=str(i)).set(float(prob))
+        
+        # Regime transition detection
+        previous_regime = self._last_regime.get(tick.symbol)
+        if previous_regime is not None and scores.regime != previous_regime:
+            _hmm_regime_transitions.labels(
+                symbol=tick.symbol,
+                from_regime=str(previous_regime),
+                to_regime=str(scores.regime)
+            ).inc()
+        self._last_regime[tick.symbol] = scores.regime
+        
+        # Decision gate state transition detection
+        if prev_state != system_state:
+            _decision_gate_transitions.labels(from_state=prev_state, to_state=system_state).inc()
+            # Determine trigger reason
+            if float(tick.trust_score) < 0.6:
+                _decision_gate_trigger_reason.labels(trigger="trust_low").inc()
+            if float(scores.anomaly_score) > 0.8:
+                _decision_gate_trigger_reason.labels(trigger="anomaly_high").inc()
+            if scores.mad_guard_triggered:
+                _decision_gate_trigger_reason.labels(trigger="mad_triggered").inc()
+        
+        self._last_gate_state[tick.symbol] = system_state
+        
+        # === PHASE 2: FEATURE VECTOR OBSERVABILITY ===
+        _feature_raw_return.labels(symbol=tick.symbol).set(scores.feature_raw_return)
+        _feature_rolling_vol.labels(symbol=tick.symbol).set(scores.feature_rolling_vol)
+        _feature_spread_divergence.labels(symbol=tick.symbol).set(scores.feature_spread_z)
+        _feature_latency_anomaly.labels(symbol=tick.symbol).set(scores.feature_latency_z)
+        _feature_volume_anomaly.labels(symbol=tick.symbol).set(scores.feature_volume_z)
+        _feature_trust_degradation.labels(symbol=tick.symbol).set(scores.feature_trust_degradation)
 
         out = ScoredTick(
             symbol=tick.symbol,
@@ -222,6 +385,8 @@ def build_service() -> Layer2Service:
 
 
 def main() -> None:
+    start_metrics_http_server(port=int(os.getenv("METRICS_PORT", "9103")))
+    mark_service_healthy("layer2_anomaly", "layer2")
     svc = build_service()
     svc.run_forever()
 

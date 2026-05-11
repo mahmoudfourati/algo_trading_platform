@@ -14,13 +14,14 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, cast
 
 from kafka import KafkaConsumer
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 from services.layer1_consensus.engine import AlignedWindow, ConsensusConfig, ConsensusEngine, TickAligner
 from services.layer1_hashlog.hash_chain import HashChainLogger
 from services.layer1_trust.scoring import TrustWeights, compute_subscores, compute_t2, compute_trust_score, load_trust_weights
 from shared.audit import emit_audit_event
 from shared.metrics_http import start_metrics_http_server
+from shared.service_health import mark_service_healthy
 from shared.schemas import ExchangeId, NormalizedTick, ValidatedTick
 from shared.tls_health_registry import get_tls_health_registry
 
@@ -97,6 +98,39 @@ _missing_tls_pins_total = Counter(
     "Total number of windows with missing/invalid TLS pins detected by derived TLS health (best-effort).",
     ["symbol", "exchange_id"],
 )
+
+# === PHASE 3: LAYER 1 DEEP TELEMETRY ===
+
+_tick_rejection_reasons = Counter(
+    "tick_rejection_total",
+    "Tick rejections by reason",
+    ["exchange_id", "reason"]  # reason = malformed|stale|duplicate|invalid_price|schema_error
+)
+
+_consensus_divergent_sources = Gauge(
+    "consensus_divergent_source_count",
+    "Number of sources excluded from consensus due to price divergence",
+    ["symbol"]
+)
+
+_consensus_divergence_magnitude = Gauge(
+    "consensus_divergence_max_bps",
+    "Maximum price divergence in basis points",
+    ["symbol"]
+)
+
+_trust_score_histogram = Histogram(
+    "trust_score_distribution",
+    "Trust score distribution for anomaly detection",
+    ["symbol"],
+    buckets=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
+)
+
+_trust_degradation_events = Counter(
+    "trust_degradation_events_total",
+    "Count of sudden trust score drops >0.1 in single window",
+    ["symbol", "primary_cause"]  # primary_cause = t1|t2|t3|t4|t5|availability
+)
 _active_exchange_count = Gauge(
     "active_exchange_count",
     "Number of exchange sources observed in the last processed window (used_sources).",
@@ -112,6 +146,44 @@ _availability_score = Gauge(
 _unhealthy_exchange_count = Gauge(
     "unhealthy_exchange_count",
     "Number of configured exchanges currently marked TLS-unhealthy.",
+)
+
+# === TRUST SCORE SUBCOMPONENTS (Phase 1 Observability) ===
+
+_trust_t1_tls = Gauge(
+    "trust_subscore_t1_tls",
+    "T1: TLS validity subscore [0,1]",
+    ["symbol", "exchange_id"]
+)
+
+_trust_t2_consensus = Gauge(
+    "trust_subscore_t2_consensus",
+    "T2: Consensus agreement subscore [0,1]",
+    ["symbol"]
+)
+
+_trust_t3_freshness = Gauge(
+    "trust_subscore_t3_freshness",
+    "T3: Latency freshness subscore [0,1]",
+    ["symbol"]
+)
+
+_trust_t4_sequence = Gauge(
+    "trust_subscore_t4_sequence",
+    "T4: Sequence integrity subscore [0,1]",
+    ["symbol", "exchange_id"]
+)
+
+_trust_t5_hashchain = Gauge(
+    "trust_subscore_t5_hashchain",
+    "T5: Hash chain continuity subscore [0,1]",
+    ["symbol"]
+)
+
+_trust_t_availability = Gauge(
+    "trust_subscore_t_availability",
+    "T_availability: Exchange availability subscore [0,1]",
+    ["symbol"]
 )
 
 
@@ -205,6 +277,7 @@ class Layer1ValidatedService:
     _last_sequence_ids: Dict[Tuple[str, ExchangeId], int]
     _last_liveness_overdue: Dict[str, float]
     _last_liveness_check_s: float
+    _last_trust_scores: Dict[str, float]  # For trust degradation detection
 
     def _compute_sequence_gap(
         self,
@@ -267,12 +340,29 @@ class Layer1ValidatedService:
                 try:
                     raw = json.loads(msg.value.decode("utf-8"))
                     tick = NormalizedTick.model_validate(raw)
-                except Exception as e:
+                except json.JSONDecodeError as e:
                     _bad_raw_ticks_total.inc()
+                    _tick_rejection_reasons.labels(exchange_id="unknown", reason="malformed").inc()
                     emit_audit_event(
                         "layer1.validated.bad_raw_tick",
                         source="layer1_validated",
-                        payload={"error": repr(e)},
+                        payload={"error": repr(e), "reason": "malformed_json"},
+                    )
+                    continue
+                except Exception as e:
+                    _bad_raw_ticks_total.inc()
+                    # Try to extract exchange_id from raw data for better metrics
+                    exchange_id = "unknown"
+                    try:
+                        if isinstance(raw, dict):
+                            exchange_id = raw.get("exchange_id", "unknown")
+                    except:
+                        pass
+                    _tick_rejection_reasons.labels(exchange_id=exchange_id, reason="schema_error").inc()
+                    emit_audit_event(
+                        "layer1.validated.bad_raw_tick",
+                        source="layer1_validated",
+                        payload={"error": repr(e), "reason": "schema_validation", "exchange_id": exchange_id},
                     )
                     continue
 
@@ -382,6 +472,53 @@ class Layer1ValidatedService:
         
         trust_score = compute_trust_score(weights=self.weights, subscores=subscores)
         _last_trust_score.labels(symbol=symbol).set(trust_score)
+        
+        # === EXPORT TRUST SUBCOMPONENTS (Phase 1 Observability) ===
+        _trust_t1_tls.labels(symbol=symbol, exchange_id=self.primary_exchange).set(subscores["T1"])
+        _trust_t2_consensus.labels(symbol=symbol).set(subscores["T2"])
+        _trust_t3_freshness.labels(symbol=symbol).set(subscores["T3"])
+        _trust_t4_sequence.labels(symbol=symbol, exchange_id=self.primary_exchange).set(subscores["T4"])
+        _trust_t5_hashchain.labels(symbol=symbol).set(subscores["T5"])
+        _trust_t_availability.labels(symbol=symbol).set(subscores.get("T_availability", 1.0))
+        
+        # === TRUST SCORE HISTOGRAM ===
+        _trust_score_histogram.labels(symbol=symbol).observe(trust_score)
+        
+        # === DETECT TRUST DEGRADATION ===
+        previous_trust = self._last_trust_scores.get(symbol, trust_score)
+        if previous_trust - trust_score > 0.1:  # >10% drop
+            # Identify primary cause (component with lowest score)
+            primary_cause = min(subscores.items(), key=lambda x: x[1])[0]
+            _trust_degradation_events.labels(symbol=symbol, primary_cause=primary_cause).inc()
+            emit_audit_event(
+                "layer1.validated.trust_degradation",
+                source="layer1_validated",
+                payload={
+                    "symbol": symbol,
+                    "previous_trust": previous_trust,
+                    "current_trust": trust_score,
+                    "drop": previous_trust - trust_score,
+                    "primary_cause": primary_cause,
+                    "subscores": subscores
+                }
+            )
+        self._last_trust_scores[symbol] = trust_score
+        
+        # === CONSENSUS DIVERGENCE DETAILS ===
+        _consensus_divergent_sources.labels(symbol=symbol).set(len(out.divergent_sources))
+        if out.divergent_sources:
+            max_divergence_bps = max([
+                abs(by_ex[ex].mid - out.consensus_mid) / out.consensus_mid * 10000
+                for ex in out.divergent_sources
+                if ex in by_ex
+            ])
+            _consensus_divergence_magnitude.labels(symbol=symbol).set(max_divergence_bps)
+        else:
+            _consensus_divergence_magnitude.labels(symbol=symbol).set(0.0)
+        
+        # === SEQUENCE GAP HISTOGRAM ===
+        if sequence_gap:
+            _sequence_gap_histogram.labels(symbol=symbol, exchange_id=self.primary_exchange).observe(sequence_gap)
 
         tick_hash, _ = self.hashlog.append(
             symbol=symbol,
@@ -475,11 +612,13 @@ def build_service() -> Layer1ValidatedService:
         _last_sequence_ids={},
         _last_liveness_overdue={},
         _last_liveness_check_s=0.0,
+        _last_trust_scores={},  # Initialize trust score tracking
     )
 
 
 def main() -> None:
     start_metrics_http_server(port=int(os.getenv("METRICS_PORT", "9102")))
+    mark_service_healthy("layer1_validated", "layer1")
     svc = build_service()
     svc.run_forever()
 

@@ -15,11 +15,12 @@ from dataclasses import dataclass, field
 from typing import Deque, Optional
 
 from kafka import KafkaConsumer
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 from services.layer1_validated.kafka_json_publisher import KafkaJsonPublisher, KafkaJsonPublisherConfig
 from shared.audit import emit_audit_event
 from shared.metrics_http import start_metrics_http_server
+from shared.service_health import mark_service_healthy
 from shared.schemas import ScoredTick, SystemState
 
 from .candles import CandleAggregationManager, CandleAggregationEvent
@@ -34,6 +35,45 @@ _bad_in_total = Counter("layer3_bad_in_total", "ScoredTick messages that failed 
 _signals_out_total = Counter("layer3_signals_out_total", "TradeSignal messages published.")
 _last_signal_size = Gauge("layer3_last_signal_size_pct", "Last signal size percentage emitted.", ["symbol"])
 _last_ofi = Gauge("layer3_last_ofi", "Last order flow imbalance emitted.", ["symbol"])
+
+# Technical Indicator Metrics
+_indicator_rsi = Gauge(
+    "strategy_indicator_rsi",
+    "RSI indicator value",
+    ["symbol", "timeframe"]
+)
+
+_indicator_macd_histogram = Gauge(
+    "strategy_indicator_macd_histogram",
+    "MACD histogram value",
+    ["symbol", "timeframe"]
+)
+
+_indicator_bb_width = Gauge(
+    "strategy_indicator_bollinger_width",
+    "Bollinger Band width (normalized)",
+    ["symbol", "timeframe"]
+)
+
+# Signal Generation Metrics
+_signal_direction_count = Counter(
+    "strategy_signal_direction_total",
+    "Signal generation count by direction",
+    ["symbol", "direction"]
+)
+
+_signal_strength_histogram = Histogram(
+    "strategy_signal_strength_distribution",
+    "Signal strength distribution",
+    ["symbol"],
+    buckets=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+)
+
+_ema_crossover_events = Counter(
+    "strategy_ema_crossover_events_total",
+    "EMA crossover events",
+    ["symbol", "timeframe", "direction"]
+)
 
 
 @dataclass
@@ -100,6 +140,25 @@ class Layer3SymbolState:
             if snapshot is None:
                 continue
 
+            # Export technical indicator metrics
+            if snapshot.rsi is not None:
+                _indicator_rsi.labels(symbol=self.symbol, timeframe=event.timeframe).set(snapshot.rsi)
+            
+            if snapshot.macd_histogram is not None:
+                _indicator_macd_histogram.labels(symbol=self.symbol, timeframe=event.timeframe).set(snapshot.macd_histogram)
+            
+            # Calculate Bollinger Band width (normalized)
+            if (snapshot.bollinger_upper is not None and 
+                snapshot.bollinger_lower is not None and 
+                snapshot.bollinger_middle is not None and 
+                snapshot.bollinger_middle > 0):
+                bb_width = (snapshot.bollinger_upper - snapshot.bollinger_lower) / snapshot.bollinger_middle
+                _indicator_bb_width.labels(symbol=self.symbol, timeframe=event.timeframe).set(bb_width)
+            
+            # Export EMA crossover events
+            if snapshot.ema_cross is not None:
+                _ema_crossover_events.labels(symbol=self.symbol, timeframe=event.timeframe, direction=snapshot.ema_cross).inc()
+
             if event.timeframe == "5m":
                 self.telemetry.candles_5m_finalized += 1
                 self.primary_history.append(snapshot)
@@ -120,6 +179,26 @@ class Layer3SymbolState:
             snapshot = self.indicator_manager.process(candle)
             if snapshot is None:
                 continue
+            
+            # Export technical indicator metrics
+            if snapshot.rsi is not None:
+                _indicator_rsi.labels(symbol=self.symbol, timeframe=event.timeframe).set(snapshot.rsi)
+            
+            if snapshot.macd_histogram is not None:
+                _indicator_macd_histogram.labels(symbol=self.symbol, timeframe=event.timeframe).set(snapshot.macd_histogram)
+            
+            # Calculate Bollinger Band width (normalized)
+            if (snapshot.bollinger_upper is not None and 
+                snapshot.bollinger_lower is not None and 
+                snapshot.bollinger_middle is not None and 
+                snapshot.bollinger_middle > 0):
+                bb_width = (snapshot.bollinger_upper - snapshot.bollinger_lower) / snapshot.bollinger_middle
+                _indicator_bb_width.labels(symbol=self.symbol, timeframe=event.timeframe).set(bb_width)
+            
+            # Export EMA crossover events
+            if snapshot.ema_cross is not None:
+                _ema_crossover_events.labels(symbol=self.symbol, timeframe=event.timeframe, direction=snapshot.ema_cross).inc()
+            
             if event.timeframe == "5m":
                 self.telemetry.candles_5m_finalized += 1
                 self.primary_history.append(snapshot)
@@ -156,6 +235,14 @@ class Layer3SymbolState:
             system_state=resolved_state,
         )
         sized = size_trade_signal(signal).signal
+        
+        # Export signal direction metric for all signals (including HOLD)
+        _signal_direction_count.labels(symbol=self.symbol, direction=sized.direction).inc()
+        
+        # Export signal strength metric only for non-HOLD signals
+        if sized.direction != "HOLD":
+            _signal_strength_histogram.labels(symbol=self.symbol).observe(sized.signal_strength)
+        
         if sized.direction == "HOLD":
             self.telemetry.hold_signals += 1
             reason = signal.reason or "unknown"
@@ -289,6 +376,8 @@ def build_service() -> Layer3Service:
 
 
 def main() -> None:
+    start_metrics_http_server(port=int(os.getenv("METRICS_PORT", "9104")))
+    mark_service_healthy("layer3_strategy", "layer3")
     svc = build_service()
     svc.run_forever()
 

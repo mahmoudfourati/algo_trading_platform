@@ -12,12 +12,25 @@
         "iconColor": "rgba(0, 211, 255, 1)",
         "name": "Annotations & Alerts",
         "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "enable": true,
+        "expr": "trust_degradation_events_total > 0",
+        "iconColor": "red",
+        "name": "Trust Degradation Events",
+        "tagKeys": "symbol,primary_cause",
+        "textFormat": "Trust drop: {{primary_cause}}",
+        "titleFormat": "Trust Degradation"
       }
     ]
   },
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "liveNow": false,

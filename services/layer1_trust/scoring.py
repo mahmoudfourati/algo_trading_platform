@@ -15,7 +15,12 @@ from typing import Dict, Optional, Set
 from shared.schemas import ExchangeId, NormalizedTick
 
 
-HALF_LIFE_MS = 25.0
+# T3 (latency freshness) half-life
+# Calibrated for real-world exchange WebSocket latencies (200-500ms typical)
+# At 500ms latency, T3 = 0.5 (half score)
+# At 1000ms latency, T3 = 0.25 (quarter score)
+# At 2000ms latency, T3 = 0.0625 (very low)
+HALF_LIFE_MS = 500.0
 LAMBDA = math.log(2.0) / HALF_LIFE_MS
 
 T2_HALF_LIFE_MS = 7_500.0

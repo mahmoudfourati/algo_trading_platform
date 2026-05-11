@@ -20,6 +20,8 @@ from kafka import KafkaConsumer
 
 from services.layer1_validated.kafka_json_publisher import KafkaJsonPublisher, KafkaJsonPublisherConfig
 from shared.audit import emit_audit_event
+from shared.metrics_http import start_metrics_http_server
+from shared.service_health import mark_service_healthy
 from services.layer5_execution.engine import ExecutionEngine
 
 
@@ -96,6 +98,8 @@ def build_service() -> Layer5Service:
 
 
 def main() -> None:
+    start_metrics_http_server(port=int(os.getenv("METRICS_PORT", "9106")))
+    mark_service_healthy("layer5_execution", "layer5")
     svc = build_service()
     svc.run_forever()
 

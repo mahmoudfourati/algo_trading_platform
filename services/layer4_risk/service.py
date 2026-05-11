@@ -14,6 +14,8 @@ from kafka import KafkaConsumer
 
 from services.layer1_validated.kafka_json_publisher import KafkaJsonPublisher, KafkaJsonPublisherConfig
 from shared.audit import emit_audit_event
+from shared.metrics_http import start_metrics_http_server
+from shared.service_health import mark_service_healthy
 from services.layer4_risk.engine import Layer4RiskEngine
 from services.layer3_strategy.signals import TradeSignal
 
@@ -73,6 +75,8 @@ def build_service() -> Layer4Service:
 
 
 def main() -> None:
+    start_metrics_http_server(port=int(os.getenv("METRICS_PORT", "9105")))
+    mark_service_healthy("layer4_risk", "layer4")
     svc = build_service()
     svc.run_forever()
 
