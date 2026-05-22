@@ -3,10 +3,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
+COPY services/metrics/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY app /app/app
+# Copy the shared module from parent context
+COPY shared /app/shared
+
+COPY services/metrics/app /app/app
 
 ENV METRICS_SERVICE_PORT=9100
 

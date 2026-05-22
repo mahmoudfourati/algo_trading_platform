@@ -1,0 +1,302 @@
+groups:
+  - name: critical_alerts
+    interval: 10s
+    rules:
+      # P1: HALT State Activation
+      - alert: SystemStateHALT
+        expr: layer2_system_state == 3
+        for: 10s
+        labels:
+          severity: critical
+          priority: P1
+          layer: layer2
+        annotations:
+          summary: "System entered HALT state"
+          description: "The trading system has entered HALT state. All trading is suspended. Current state: {{ $value }}"
+          runbook_url: "https://docs/runbooks/halt-state"
+
+      # P1: Audit Chain Break
+      - alert: AuditChainIntegrityFailure
+        expr: audit_chain_valid == 0
+        for: 0s
+        labels:
+          severity: critical
+          priority: P1
+          layer: layer6
+        annotations:
+          summary: "Audit chain integrity compromised"
+          description: "Hash verification failure detected in audit chain. Immediate investigation required."
+          runbook_url: "https://docs/runbooks/audit-chain-break"
+
+      # P1: Kafka Broker Down
+      - alert: KafkaBrokerDown
+        expr: kafka_brokers < 1
+        for: 30s
+        labels:
+          severity: critical
+          priority: P1
+          component: kafka
+        annotations:
+          summary: "Kafka broker unavailable"
+          description: "No Kafka brokers are available. Message pipeline is down."
+          runbook_url: "https://docs/runbooks/kafka-broker-down"
+
+      # P1: Layer Service Down
+      - alert: LayerServiceDown
+        expr: up{job=~"layer.*"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          priority: P1
+        annotations:
+          summary: "Layer service {{ $labels.job }} is down"
+          description: "Service {{ $labels.job }} on {{ $labels.instance }} is not responding to health checks."
+          runbook_url: "https://docs/runbooks/service-down"
+
+      # P1: Replay Attack Suspicion
+      - alert: ReplayAttackDetected
+        expr: increase(replay_suspicion_total[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+          priority: P1
+          layer: layer1
+          security: true
+        annotations:
+          summary: "Replay attack suspected on {{ $labels.symbol }}"
+          description: "Replay attack detection triggered. Count: {{ $value }}"
+          runbook_url: "https://docs/runbooks/replay-attack"
+
+  - name: high_priority_alerts
+    interval: 15s
+    rules:
+      # P2: Trust Score Below Threshold
+      - alert: TrustScoreLow
+        expr: trust_score < 0.6
+        for: 1m
+        labels:
+          severity: high
+          priority: P2
+          layer: layer1
+        annotations:
+          summary: "Trust score below threshold for {{ $labels.symbol }}"
+          description: "Trust score has been below 0.6 for 1 minute. Current: {{ $value | humanize }}"
+          runbook_url: "https://docs/runbooks/low-trust-score"
+
+      # P2: Anomaly Score Spike
+      - alert: AnomalyScoreHigh
+        expr: anomaly_fused_score > 0.8
+        for: 30s
+        labels:
+          severity: high
+          priority: P2
+          layer: layer2
+        annotations:
+          summary: "High anomaly score detected for {{ $labels.symbol }}"
+          description: "Anomaly score has exceeded 0.8 for 30 seconds. Current: {{ $value | humanize }}"
+          runbook_url: "https://docs/runbooks/high-anomaly"
+
+      # P2: Consensus Divergence Spike
+      - alert: ConsensusDivergenceHigh
+        expr: consensus_divergence > 0.01
+        for: 1m
+        labels:
+          severity: high
+          priority: P2
+          layer: layer1
+        annotations:
+          summary: "High price divergence across exchanges for {{ $labels.symbol }}"
+          description: "Price divergence exceeds 1% across exchanges. Current: {{ $value | humanizePercentage }}"
+          runbook_url: "https://docs/runbooks/consensus-divergence"
+
+      # P2: High Kafka Lag
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumergroup_lag > 1000
+        for: 2m
+        labels:
+          severity: high
+          priority: P2
+          component: kafka
+        annotations:
+          summary: "High consumer lag on {{ $labels.topic }}"
+          description: "Consumer group {{ $labels.consumergroup }} has lag of {{ $value }} messages on topic {{ $labels.topic }}"
+          runbook_url: "https://docs/runbooks/kafka-lag"
+
+      # P2: Websocket Disconnect
+      - alert: ExchangeWebsocketDisconnected
+        expr: websocket_connected{exchange=~".*"} == 0
+        for: 30s
+        labels:
+          severity: high
+          priority: P2
+          layer: layer1
+        annotations:
+          summary: "Exchange websocket disconnected: {{ $labels.exchange }}"
+          description: "Websocket connection to {{ $labels.exchange }} has been down for 30 seconds."
+          runbook_url: "https://docs/runbooks/websocket-disconnect"
+
+      # P2: TLS Pinning Failures
+      - alert: TLSPinningFailures
+        expr: increase(tls_pinning_failures_total[5m]) > 5
+        for: 0s
+        labels:
+          severity: high
+          priority: P2
+          layer: layer1
+          security: true
+        annotations:
+          summary: "Multiple TLS pinning failures detected"
+          description: "{{ $value }} TLS certificate validation failures in the last 5 minutes for {{ $labels.exchange }}"
+          runbook_url: "https://docs/runbooks/tls-pinning"
+
+  - name: medium_priority_alerts
+    interval: 30s
+    rules:
+      # P3: High Retry Count
+      - alert: ExecutionRetriesHigh
+        expr: increase(execution_retries_total[5m]) > 10
+        for: 0s
+        labels:
+          severity: medium
+          priority: P3
+          layer: layer5
+        annotations:
+          summary: "High execution retry count"
+          description: "{{ $value }} execution retries in the last 5 minutes. Reason: {{ $labels.reason }}"
+          runbook_url: "https://docs/runbooks/high-retries"
+
+      # P3: Circuit Breaker Open
+      - alert: RiskCircuitBreakerOpen
+        expr: risk_circuit_breaker_state == 1
+        for: 1m
+        labels:
+          severity: medium
+          priority: P3
+          layer: layer4
+        annotations:
+          summary: "Risk circuit breaker is open"
+          description: "Circuit breaker has been open for 1 minute. Trading is paused."
+          runbook_url: "https://docs/runbooks/circuit-breaker"
+
+      # P3: Container High CPU
+      - alert: ContainerHighCPU
+        expr: rate(container_cpu_usage_seconds_total{name=~"algo-trading.*"}[5m]) > 0.8
+        for: 5m
+        labels:
+          severity: medium
+          priority: P3
+          component: infrastructure
+        annotations:
+          summary: "High CPU usage on container {{ $labels.name }}"
+          description: "Container {{ $labels.name }} CPU usage is {{ $value | humanizePercentage }} for 5 minutes."
+          runbook_url: "https://docs/runbooks/high-cpu"
+
+      # P3: Container High Memory
+      - alert: ContainerHighMemory
+        expr: (container_memory_usage_bytes{name=~"algo-trading.*"} / container_spec_memory_limit_bytes{name=~"algo-trading.*"}) > 0.8
+        for: 5m
+        labels:
+          severity: medium
+          priority: P3
+          component: infrastructure
+        annotations:
+          summary: "High memory usage on container {{ $labels.name }}"
+          description: "Container {{ $labels.name }} memory usage is {{ $value | humanizePercentage }} for 5 minutes."
+          runbook_url: "https://docs/runbooks/high-memory"
+
+      # P3: System State DEGRADED
+      - alert: SystemStateDegraded
+        expr: layer2_system_state == 2
+        for: 5m
+        labels:
+          severity: medium
+          priority: P3
+          layer: layer2
+        annotations:
+          summary: "System in DEGRADED state"
+          description: "System has been in DEGRADED state for 5 minutes. Trading is restricted."
+          runbook_url: "https://docs/runbooks/degraded-state"
+
+      # P3: High Risk Rejections
+      - alert: RiskRejectionsHigh
+        expr: increase(risk_rejections_total[10m]) > 20
+        for: 0s
+        labels:
+          severity: medium
+          priority: P3
+          layer: layer4
+        annotations:
+          summary: "High risk rejection rate"
+          description: "{{ $value }} risk rejections in the last 10 minutes. Reason: {{ $labels.reason }}"
+          runbook_url: "https://docs/runbooks/risk-rejections"
+
+  - name: performance_alerts
+    interval: 30s
+    rules:
+      # Model Inference Latency
+      - alert: ModelInferenceLatencyHigh
+        expr: histogram_quantile(0.95, rate(anomaly_model_inference_duration_ms_bucket[5m])) > 50
+        for: 5m
+        labels:
+          severity: medium
+          priority: P3
+          layer: layer2
+        annotations:
+          summary: "High model inference latency"
+          description: "95th percentile model inference latency is {{ $value }}ms for model {{ $labels.model }}"
+          runbook_url: "https://docs/runbooks/inference-latency"
+
+      # Execution Latency
+      - alert: ExecutionLatencyHigh
+        expr: histogram_quantile(0.95, rate(execution_latency_ms_bucket[5m])) > 100
+        for: 5m
+        labels:
+          severity: medium
+          priority: P3
+          layer: layer5
+        annotations:
+          summary: "High execution latency"
+          description: "95th percentile execution latency is {{ $value }}ms"
+          runbook_url: "https://docs/runbooks/execution-latency"
+
+  - name: data_quality_alerts
+    interval: 30s
+    rules:
+      # Sequence Gaps
+      - alert: SequenceGapsDetected
+        expr: increase(sequence_gaps_total[5m]) > 10
+        for: 0s
+        labels:
+          severity: high
+          priority: P2
+          layer: layer1
+        annotations:
+          summary: "Multiple sequence gaps detected"
+          description: "{{ $value }} sequence integrity violations in the last 5 minutes for {{ $labels.symbol }}"
+          runbook_url: "https://docs/runbooks/sequence-gaps"
+
+      # Quarantined Ticks
+      - alert: QuarantinedTicksHigh
+        expr: increase(quarantined_ticks_total[5m]) > 50
+        for: 0s
+        labels:
+          severity: medium
+          priority: P3
+          layer: layer1
+        annotations:
+          summary: "High quarantined tick rate"
+          description: "{{ $value }} ticks quarantined in the last 5 minutes for {{ $labels.symbol }}"
+          runbook_url: "https://docs/runbooks/quarantined-ticks"
+
+      # Bad Message Rate
+      - alert: BadMessageRateHigh
+        expr: rate(layer2_bad_in_total[5m]) / rate(layer2_raw_in_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: medium
+          priority: P3
+          layer: layer2
+        annotations:
+          summary: "High bad message rate in Layer 2"
+          description: "{{ $value | humanizePercentage }} of messages are failing validation in Layer 2"
+          runbook_url: "https://docs/runbooks/bad-messages"

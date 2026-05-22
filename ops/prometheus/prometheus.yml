@@ -2,24 +2,106 @@
 global:
   scrape_interval: 5s
   evaluation_interval: 5s
+  external_labels:
+    cluster: 'algo-trading-platform'
+    environment: 'production'
+
+# Alert rule files
+rule_files:
+  - '/etc/prometheus/alerts/*.yml'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+          # - alertmanager:9093  # Uncomment when alertmanager is deployed
 
 scrape_configs:
-  - job_name: "metrics-service"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["metrics-service:9100"]
-
+  # Application Layer Services
   - job_name: "layer1-ingestion"
     metrics_path: /metrics
     static_configs:
       - targets: ["layer1-ingestion:9101"]
+        labels:
+          layer: "layer1"
+          service: "ingestion"
 
   - job_name: "layer1-validated"
     metrics_path: /metrics
     static_configs:
       - targets: ["layer1-validated:9102"]
+        labels:
+          layer: "layer1"
+          service: "validated"
 
   - job_name: "layer2-anomaly"
     metrics_path: /metrics
     static_configs:
       - targets: ["layer2-anomaly:9103"]
+        labels:
+          layer: "layer2"
+          service: "anomaly"
+
+  - job_name: "layer3-strategy"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["layer3-strategy:9104"]
+        labels:
+          layer: "layer3"
+          service: "strategy"
+
+  - job_name: "layer4-risk"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["layer4-risk:9105"]
+        labels:
+          layer: "layer4"
+          service: "risk"
+
+  - job_name: "layer5-execution"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["layer5-execution:9106"]
+        labels:
+          layer: "layer5"
+          service: "execution"
+
+  - job_name: "layer6-audit"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["layer6-audit:9107"]
+        labels:
+          layer: "layer6"
+          service: "audit"
+
+  # Infrastructure Monitoring
+  - job_name: "kafka-exporter"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+        labels:
+          component: "kafka"
+
+  # Note: cadvisor and node-exporter disabled on Windows
+  # - job_name: "cadvisor"
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["cadvisor:8080"]
+  #       labels:
+  #         component: "containers"
+
+  # - job_name: "node-exporter"
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["node-exporter:9100"]
+  #       labels:
+  #         component: "system"
+
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          component: "prometheus"

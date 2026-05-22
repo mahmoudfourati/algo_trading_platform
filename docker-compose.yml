@@ -44,7 +44,8 @@ services:
 
   metrics-service:
     build:
-      context: ./services/metrics
+      context: .
+      dockerfile: ./services/metrics/Dockerfile
     environment:
       METRICS_SERVICE_PORT: "9100"
     ports:
@@ -185,6 +186,27 @@ services:
       kafka:
         condition: service_healthy
 
+  layer6-audit:
+    build:
+      context: .
+      dockerfile: ./services/layer6_audit/Dockerfile
+    environment:
+      KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
+      METRICS_PORT: "9107"
+      KAFKA_AUDIT_TOPIC: "audit.events"
+      KAFKA_AUTO_OFFSET_RESET: "earliest"
+      AUDIT_LOG_PATH: "/app/logs/audit_chain.jsonl"
+      AUDIT_MAX_FILE_SIZE_BYTES: "104857600"
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "9107:9107"
+    networks:
+      - trading-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:v2.54.0
     command:
@@ -203,6 +225,7 @@ services:
       - layer3-strategy
       - layer4-risk
       - layer5-execution
+      - layer6-audit
 
   grafana:
     image: grafana/grafana:11.2.0
@@ -210,8 +233,10 @@ services:
       GF_SECURITY_ADMIN_USER: "admin"
       GF_SECURITY_ADMIN_PASSWORD: "admin"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_INSTALL_PLUGINS: "grafana-piechart-panel,grafana-worldmap-panel"
     volumes:
       - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-storage:/var/lib/grafana
     ports:
       - "3000:3000"
     networks:
@@ -219,6 +244,55 @@ services:
     depends_on:
       - prometheus
 
+  # cadvisor:
+  #   image: gcr.io/cadvisor/cadvisor:v0.49.1
+  #   container_name: cadvisor
+  #   privileged: true
+  #   ports:
+  #     - "8080:8080"
+  #   volumes:
+  #     - /:/rootfs:ro
+  #     - /var/run:/var/run:ro
+  #     - /sys:/sys:ro
+  #     - /var/lib/docker/:/var/lib/docker:ro
+  #     - /dev/disk/:/dev/disk:ro
+  #   networks:
+  #     - trading-net
+  #   command:
+  #     - "--housekeeping_interval=10s"
+  #     - "--docker_only=true"
+  #   # Note: Disabled on Windows - requires Linux host filesystem access
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    container_name: kafka-exporter
+    ports:
+      - "9308:9308"
+    command:
+      - "--kafka.server=kafka:9092"
+      - "--web.listen-address=:9308"
+    networks:
+      - trading-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # node-exporter:
+  #   image: prom/node-exporter:v1.8.1
+  #   container_name: node-exporter
+  #   ports:
+  #     - "9100:9100"
+  #   command:
+  #     - "--path.rootfs=/host"
+  #   volumes:
+  #     - /:/host:ro,rslave
+  #   networks:
+  #     - trading-net
+  #   # Note: Disabled on Windows - requires Linux host filesystem access
+
 networks:
   trading-net:
     driver: bridge
+
+volumes:
+  grafana-storage:

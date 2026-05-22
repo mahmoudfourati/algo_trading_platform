@@ -30,7 +30,7 @@
   "refresh": "10s",
   "timezone": "browser",
   "time": {
-    "from": "now-3h",
+    "from": "now-15m",
     "to": "now"
   },
   "timepicker": {
@@ -147,7 +147,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "(avg(layer1_trust_score) * 0.3 + (1 - avg(rate(kafka_json_publisher_errors_total[5m]))) * 0.3 + avg(exchange_connection_health) * 0.2 + (1 - avg(rate(layer4_rejections_total[5m]))) * 0.2)",
+          "expr": "(avg(layer1_validated_last_trust_score) * 0.3 + (1 - avg(rate(kafka_json_publisher_errors_total[5m]))) * 0.3 + avg(exchange_connection_health) * 0.2 + (1 - avg(rate(tick_rejection_total[5m]))) * 0.2)",
           "legendFormat": "Pipeline Health",
           "refId": "A"
         }
@@ -493,7 +493,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_tls_validity",
+          "expr": "tls_exchange_health",
           "legendFormat": "{{exchange_id}}",
           "refId": "A"
         }
@@ -598,7 +598,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "rate(layer1_ticks_received_total[1m])",
+          "expr": "rate(layer1_ingestion_ticks_total[1m])",
           "legendFormat": "{{exchange_id}}",
           "refId": "A"
         }
@@ -716,7 +716,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_trust_score",
+          "expr": "layer1_validated_last_trust_score",
           "legendFormat": "{{exchange_id}}",
           "refId": "A"
         }
@@ -776,7 +776,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_sequence_gaps_total",
+          "expr": "tick_rejection_total",
           "legendFormat": "{{exchange_id}}",
           "refId": "A"
         }
@@ -824,7 +824,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_consensus_divergence_ratio",
+          "expr": "consensus_divergence_max_bps",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -914,7 +914,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_trust_score",
+          "expr": "layer1_validated_last_trust_score",
           "legendFormat": "{{symbol}}",
           "refId": "A"
         }
@@ -994,31 +994,31 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "avg by (symbol) (layer1_trust_sub_t1)",
+          "expr": "avg by (symbol) (trust_subscore_t1_tls)",
           "legendFormat": "T1 TLS",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_trust_sub_t2",
+          "expr": "trust_subscore_t2_consensus",
           "legendFormat": "T2 Consensus",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_trust_sub_t3",
+          "expr": "trust_subscore_t3_freshness",
           "legendFormat": "T3 Latency",
           "refId": "C"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "avg by (symbol) (layer1_trust_sub_t4)",
+          "expr": "avg by (symbol) (trust_subscore_t4_sequence)",
           "legendFormat": "T4 Sequence",
           "refId": "D"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_trust_sub_t5",
+          "expr": "trust_subscore_t5_hashchain",
           "legendFormat": "T5 Hash",
           "refId": "E"
         }
@@ -1098,31 +1098,31 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "0.25 * avg by (symbol) (layer1_trust_sub_t1)",
+          "expr": "0.25 * avg by (symbol) (trust_subscore_t1_tls)",
           "legendFormat": "T1 Contribution",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "0.30 * layer1_trust_sub_t2",
+          "expr": "0.30 * trust_subscore_t2_consensus",
           "legendFormat": "T2 Contribution",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "0.20 * layer1_trust_sub_t3",
+          "expr": "0.20 * trust_subscore_t3_freshness",
           "legendFormat": "T3 Contribution",
           "refId": "C"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "0.15 * avg by (symbol) (layer1_trust_sub_t4)",
+          "expr": "0.15 * avg by (symbol) (trust_subscore_t4_sequence)",
           "legendFormat": "T4 Contribution",
           "refId": "D"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "0.10 * layer1_trust_sub_t5",
+          "expr": "0.10 * trust_subscore_t5_hashchain",
           "legendFormat": "T5 Contribution",
           "refId": "E"
         }
@@ -1166,13 +1166,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_divergent_source_count",
+          "expr": "consensus_divergent_source_count",
           "legendFormat": "Divergent Sources",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "layer1_max_divergence_bps",
+          "expr": "consensus_divergence_max_bps",
           "legendFormat": "Max Divergence bps",
           "refId": "B"
         }
@@ -2342,7 +2342,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "rate(layer4_rejections_total[5m]) * 60",
+          "expr": "rate(tick_rejection_total[5m]) * 60",
           "format": "table",
           "instant": true,
           "legendFormat": "",
