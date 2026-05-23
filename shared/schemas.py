@@ -14,8 +14,13 @@ ExchangeId = Literal["binance", "coinbase", "kraken", "okx", "bybit"]
 
 
 class RawTick(BaseModel):
+    """Raw tick from exchange adapter before validation.
+    
+    This is the first message in the pipeline, emitted by Layer 1 ingestion adapters.
+    """
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: str = Field(default="v1", description="Schema version for compatibility checking")
     exchange_id: ExchangeId
     symbol: str = Field(description="Normalized symbol, e.g. 'BTC-USDT'")
     bid: float
@@ -26,10 +31,10 @@ class RawTick(BaseModel):
     received_timestamp_ms: int
     timestamp_source: Literal["exchange", "receive"] = "exchange"
     sequence_id: Optional[int] = None
-    # Set by the adapter after TLS pin verification. Defaults to True so that
-    # messages produced before this field existed (or in backtest/test contexts
-    # where pinning is not performed) are not penalised.
-    tls_ok: bool = True
+    # SAFETY: Pessimistic default - assume TLS unhealthy until adapter explicitly validates.
+    # Adapters must set tls_ok=True after successful TLS pin verification.
+    # This ensures trust score T1 subscore is 0.0 for unvalidated ticks.
+    tls_ok: bool = False
 
     @property
     def mid(self) -> float:
@@ -37,8 +42,13 @@ class RawTick(BaseModel):
 
 
 class NormalizedTick(BaseModel):
+    """Normalized tick after adapter-specific transformations.
+    
+    Intermediate format used within Layer 1 pipeline.
+    """
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: str = Field(default="v1", description="Schema version for compatibility checking")
     exchange_id: ExchangeId
     symbol: str = Field(description="Normalized symbol, e.g. 'BTC-USDT'")
     bid: float
@@ -49,9 +59,10 @@ class NormalizedTick(BaseModel):
     received_timestamp_ms: int
     timestamp_source: Literal["exchange", "receive"] = "exchange"
     sequence_id: Optional[int] = None
+    # SAFETY: Pessimistic default - assume TLS unhealthy until adapter explicitly validates.
     # Mirrors RawTick.tls_ok — carried through the adapter pipeline so the
     # validated service can read the real pin-check result from the tick itself.
-    tls_ok: bool = True
+    tls_ok: bool = False
 
     @property
     def mid(self) -> float:
@@ -59,8 +70,27 @@ class NormalizedTick(BaseModel):
 
 
 class ValidatedTick(BaseModel):
+    """Validated tick with consensus pricing and trust scoring.
+    
+    This model represents the output of Layer 1 after multi-source consensus,
+    trust scoring, and hash chain validation.
+    
+    Fields:
+        execution_venue_prices: Dict of exchange_id -> mid_price for execution-time
+            divergence checking. Populated by Layer 1 with all exchanges that
+            participated in consensus.
+            
+            Behavior:
+            - Empty dict: Backward compatibility (old Layer 1 versions) or no consensus
+            - Missing venue: Execution venue not in consensus (Layer 5 should reject)
+            - Present: Use for divergence check in Layer 5
+            
+            Example:
+                {"binance": 75500.0, "coinbase": 75498.0, "kraken": 75502.0}
+    """
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: str = Field(default="v2", description="Schema version (v2 adds execution_venue_prices)")
     symbol: str
     asset_class: Literal["crypto"] = "crypto"
     # DEPRECATED: primary_exchange kept for backward compatibility but no longer used for pricing
@@ -87,14 +117,45 @@ class ValidatedTick(BaseModel):
     liveness: Optional[dict[str, float]] = None
     timestamp_utc: int
     tick_hash: str
+    
+    def check_execution_venue(self, venue: ExchangeId) -> tuple[bool, str]:
+        """Check if execution venue price is available for divergence checking.
+        
+        Args:
+            venue: Exchange ID where order will be executed (e.g., "binance")
+            
+        Returns:
+            (is_available, reason) tuple:
+            - (True, "ok"): Venue price available
+            - (False, "execution_venue_prices_empty"): No venue prices (backward compat)
+            - (False, "execution_venue_{venue}_not_in_prices"): Venue not in consensus
+            
+        Example:
+            >>> tick = ValidatedTick(...)
+            >>> is_ok, reason = tick.check_execution_venue("binance")
+            >>> if not is_ok:
+            ...     print(f"Cannot execute: {reason}")
+        """
+        if not self.execution_venue_prices:
+            return (False, "execution_venue_prices_empty")
+        
+        if venue not in self.execution_venue_prices:
+            return (False, f"execution_venue_{venue}_not_in_prices")
+        
+        return (True, "ok")
 
 
 SystemState = Literal["NORMAL", "CONSERVATIVE", "DEGRADED", "HALT"]
 
 
 class ScoredTick(BaseModel):
+    """Scored tick with anomaly detection and regime classification.
+    
+    Output of Layer 2 after HMM regime detection and anomaly scoring.
+    """
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: str = Field(default="v1", description="Schema version for compatibility checking")
     # ValidatedTick fields
     symbol: str
     asset_class: Literal["crypto"] = "crypto"
@@ -122,8 +183,13 @@ class ScoredTick(BaseModel):
 
 
 class ApprovedOrder(BaseModel):
+    """Risk-approved trading order ready for execution.
+    
+    Output of Layer 4 after risk checks and position sizing.
+    """
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: str = Field(default="v1", description="Schema version for compatibility checking")
     symbol: str
     direction: Literal["LONG", "SHORT", "CLOSE_ALL"]
     size_pct: float
@@ -147,8 +213,13 @@ class ApprovedOrder(BaseModel):
 
 
 class ExecutedOrder(BaseModel):
+    """Executed order with fill details and slippage.
+    
+    Output of Layer 5 after order execution.
+    """
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: str = Field(default="v1", description="Schema version for compatibility checking")
     order_id: str
     client_order_id: Optional[str] = None
     symbol: str
@@ -161,6 +232,10 @@ class ExecutedOrder(BaseModel):
 
 # Schema versioning constants
 SCHEMA_VERSIONS = {
+    "RawTick": "v1",
+    "NormalizedTick": "v1",
+    "ValidatedTick": "v2",  # v2 adds execution_venue_prices
+    "ScoredTick": "v1",
     "ApprovedOrder": "v1",
     "ExecutedOrder": "v1",
 }
