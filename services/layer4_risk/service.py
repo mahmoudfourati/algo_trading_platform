@@ -90,6 +90,11 @@ class Layer4Service:
                 if reference_price is None:
                     reference_price = raw.get("entry_price") or raw.get("entry_price")
 
+                # Extract consensus price and execution venue prices from the signal
+                # These come from the ScoredTick that generated the signal
+                consensus_price = raw.get("consensus_price") or raw.get("mid_price") or raw.get("entry_price")
+                execution_venue_prices = raw.get("execution_venue_prices", {})
+
                 # portfolio exposure currently unknown in this service wrapper; default to 0.0
                 start_time = time.perf_counter()
                 decision = self.engine.evaluate_signal(signal, reference_price=reference_price or 0.0, current_portfolio_exposure_pct=0.0)
@@ -105,6 +110,11 @@ class Layer4Service:
                 
                 if decision.approved and decision.approved_order is not None:
                     payload = decision.approved_order.model_dump() if hasattr(decision.approved_order, "model_dump") else decision.approved_order.__dict__
+                    
+                    # Add consensus price and execution venue prices for Layer 5 divergence checking
+                    payload["consensus_price"] = consensus_price
+                    payload["execution_venue_prices"] = execution_venue_prices
+                    
                     self.publisher.publish(payload)
                     _approvals_out_total.labels(symbol=decision.approved_order.symbol, direction=decision.approved_order.direction).inc()
                     emit_audit_event("layer4.order_approved", source="layer4_risk", payload={"symbol": decision.approved_order.symbol, "client_time": int(time.time() * 1000)})

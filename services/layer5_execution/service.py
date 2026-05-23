@@ -24,6 +24,20 @@ from shared.audit import emit_audit_event
 from shared.metrics_http import start_metrics_http_server
 from shared.service_health import mark_service_healthy
 from services.layer5_execution.engine import ExecutionEngine
+from prometheus_client import Counter, Histogram
+
+# Prometheus metrics for execution divergence tracking
+DIVERGENCE_REJECTIONS = Counter(
+    "execution_divergence_rejections_total",
+    "Total number of orders rejected due to execution venue price divergence",
+    ["symbol", "execution_venue"]
+)
+DIVERGENCE_BPS = Histogram(
+    "execution_divergence_bps",
+    "Execution venue price divergence from consensus in basis points",
+    ["symbol", "execution_venue"],
+    buckets=[0, 5, 10, 20, 30, 50, 75, 100, 150, 200, 500, 1000]
+)
 
 
 # === PROMETHEUS METRICS ===
@@ -124,11 +138,35 @@ class Layer5Service:
                 direction = raw.get("direction", "UNKNOWN")
                 
                 try:
+                    # Extract divergence checking parameters
+                    consensus_price = raw.get("consensus_price") or raw.get("entry_price")
+                    execution_venue_prices = raw.get("execution_venue_prices", {})
+                    execution_venue = os.getenv("EXECUTION_VENUE", "binance")
+                    reference_price = raw.get("entry_price")
+                    
+                    # Calculate and record divergence metrics if we have the data
+                    if consensus_price and execution_venue_prices and execution_venue in execution_venue_prices:
+                        venue_price = execution_venue_prices[execution_venue]
+                        if consensus_price > 0:
+                            divergence_bps = abs(venue_price - consensus_price) / consensus_price * 10000
+                            DIVERGENCE_BPS.labels(symbol=symbol, execution_venue=execution_venue).observe(divergence_bps)
+                    
+                    # Track execution latency
                     start_time = time.perf_counter()
-                    executed = self.engine.submit_order(raw, reference_price=raw.get("entry_price"))
+                    executed = self.engine.submit_order(
+                        raw,
+                        reference_price=reference_price,
+                        consensus_price=consensus_price,
+                        execution_venue_prices=execution_venue_prices,
+                        execution_venue=execution_venue
+                    )
                     execution_ms = (time.perf_counter() - start_time) * 1000
                     _execution_latency_ms.labels(exchange_id=exchange_id).observe(execution_ms)
                     
+                    # Track rejections
+                    if executed.note and "REJECTED" in executed.note:
+                        DIVERGENCE_REJECTIONS.labels(symbol=symbol, execution_venue=execution_venue).inc()
+                        
                 except Exception as exc:
                     _orders_failed_total.labels(exchange_id=exchange_id, symbol=symbol, reason="exception").inc()
                     emit_audit_event("layer5.execution_failed", source="layer5_execution", payload={"error": repr(exc), "order": raw})

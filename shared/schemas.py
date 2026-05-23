@@ -63,15 +63,21 @@ class ValidatedTick(BaseModel):
 
     symbol: str
     asset_class: Literal["crypto"] = "crypto"
-    primary_exchange: ExchangeId = Field(description="Configured primary exchange for downstream operation.")
-    mid_price: float = Field(description="Primary exchange mid price used by downstream layers.")
-    consensus_mid: float = Field(description="Consensus mid computed from the validated source set.")
+    # DEPRECATED: primary_exchange kept for backward compatibility but no longer used for pricing
+    primary_exchange: ExchangeId = Field(description="Deprecated: Kept for backward compatibility. Use execution_venue instead.")
+    mid_price: float = Field(description="Consensus mid price from multi-source validation (used by all downstream layers).")
+    consensus_mid: float = Field(description="Consensus mid computed from the validated source set (same as mid_price).")
+    # NEW: Execution venue prices for divergence checking at execution time
+    execution_venue_prices: dict[ExchangeId, float] = Field(
+        default_factory=dict,
+        description="Mid prices from each exchange for execution-time divergence checking."
+    )
     # Optional for backward compatibility with previously emitted ticks.
     # Layer 2 uses these fields if present for feature construction.
-    volume_24h: Optional[float] = Field(default=None, description="Primary exchange 24h volume.")
+    volume_24h: Optional[float] = Field(default=None, description="Median 24h volume across consensus sources.")
     spread: Optional[float] = Field(
         default=None,
-        description="Primary exchange relative spread computed as (ask-bid)/mid_price.",
+        description="Median relative spread across consensus sources computed as (ask-bid)/mid_price.",
     )
     trust_score: float
     sub_scores: dict[str, float]
@@ -92,9 +98,10 @@ class ScoredTick(BaseModel):
     # ValidatedTick fields
     symbol: str
     asset_class: Literal["crypto"] = "crypto"
-    primary_exchange: ExchangeId
-    mid_price: float
-    consensus_mid: float
+    primary_exchange: ExchangeId  # Deprecated but kept for compatibility
+    mid_price: float  # Consensus price
+    consensus_mid: float  # Same as mid_price
+    execution_venue_prices: dict[ExchangeId, float] = Field(default_factory=dict)
     volume_24h: Optional[float] = None
     spread: Optional[float] = None
     trust_score: float

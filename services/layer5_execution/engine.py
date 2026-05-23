@@ -56,6 +56,7 @@ class ExecutionTelemetry:
     retry_attempts: int = 0
     failed_submissions: int = 0
     close_all_orders: int = 0
+    divergence_rejections: int = 0  # NEW: Track rejections due to price divergence
 
 
 class ExecutionEngine:
@@ -66,9 +67,10 @@ class ExecutionEngine:
     tolerates mappings and extracts commonly used fields.
     """
 
-    def __init__(self, *, adapter: Optional[SimulatedExecutionAdapter] = None, portfolio_value: float = 1.0, persistence_db: Optional[Path] = None, publisher: Optional[object] = None) -> None:
+    def __init__(self, *, adapter: Optional[SimulatedExecutionAdapter] = None, portfolio_value: float = 1.0, persistence_db: Optional[Path] = None, max_divergence_bps: float = 50.0, publisher: Optional[object] = None) -> None:
         self.adapter = adapter or SimulatedExecutionAdapter()
         self.portfolio_value = float(portfolio_value)
+        self.max_divergence_bps = float(max_divergence_bps)  # NEW: Maximum allowed divergence (default 0.5%)
         self._orders: Dict[str, OrderRecord] = {}
         self._executions: Dict[str, ExecutedOrder] = {}
         self._next_id = 1
@@ -82,6 +84,38 @@ class ExecutionEngine:
         # perform startup reconciliation if store present
         if self.store is not None:
             self.reconcile_pending_orders()
+
+    def check_execution_divergence(self, *, consensus_price: float, execution_venue_prices: Dict[str, float], execution_venue: str) -> tuple[bool, float, str]:
+        """Check if execution venue price diverges from consensus.
+        
+        Args:
+            consensus_price: Consensus price from Layer 1
+            execution_venue_prices: Dict of exchange_id -> mid_price
+            execution_venue: Exchange where order will be executed (e.g., "binance")
+            
+        Returns:
+            (is_acceptable, divergence_bps, reason)
+        """
+        if not execution_venue_prices:
+            # No venue prices available - allow execution (backward compatibility)
+            return (True, 0.0, "no_venue_prices_available")
+        
+        venue_price = execution_venue_prices.get(execution_venue)
+        if venue_price is None:
+            # Execution venue not in consensus - reject for safety
+            return (False, float('inf'), f"execution_venue_{execution_venue}_not_in_consensus")
+        
+        if consensus_price <= 0:
+            # Invalid consensus price - reject
+            return (False, float('inf'), "invalid_consensus_price")
+        
+        # Calculate divergence in basis points
+        divergence_bps = abs(venue_price - consensus_price) / consensus_price * 10000
+        
+        if divergence_bps > self.max_divergence_bps:
+            return (False, divergence_bps, f"divergence_{divergence_bps:.1f}bps_exceeds_max_{self.max_divergence_bps:.1f}bps")
+        
+        return (True, divergence_bps, "acceptable")
 
     def _make_order_id(self) -> str:
         oid = f"exec-{int(time.time() * 1000)}-{self._next_id}"
@@ -178,8 +212,16 @@ class ExecutionEngine:
                 self.store.mark_duplicate(pending.client_order_id)
                 self._status_result_to_execution(status)
 
-    def submit_order(self, approved_order: Mapping, *, reference_price: Optional[float] = None) -> ExecutedOrder:
-        """Submit an approved order (mapping/object). Returns ExecutedOrder."""
+    def submit_order(self, approved_order: Mapping, *, reference_price: Optional[float] = None, consensus_price: Optional[float] = None, execution_venue_prices: Optional[Dict[str, float]] = None, execution_venue: str = "binance") -> ExecutedOrder:
+        """Submit an approved order (mapping/object). Returns ExecutedOrder.
+        
+        Args:
+            approved_order: Approved order mapping or object
+            reference_price: Reference price for execution (optional, extracted from order if not provided)
+            consensus_price: Consensus price from Layer 1 (for divergence checking)
+            execution_venue_prices: Dict of exchange_id -> mid_price from Layer 1
+            execution_venue: Exchange where order will be executed (default: "binance")
+        """
 
         self.telemetry.submitted_orders += 1
         # robust field extraction
@@ -194,6 +236,52 @@ class ExecutionEngine:
             if entry_price is None:
                 raise ValueError("reference_price or order.entry_price is required")
             reference_price = float(entry_price)
+        
+        # NEW: Check execution venue divergence from consensus
+        if consensus_price is not None and execution_venue_prices is not None:
+            is_acceptable, divergence_bps, reason = self.check_execution_divergence(
+                consensus_price=consensus_price,
+                execution_venue_prices=execution_venue_prices,
+                execution_venue=execution_venue
+            )
+            
+            if not is_acceptable:
+                self.telemetry.divergence_rejections += 1
+                # Create a rejected execution record
+                timestamp_ms = int(time.time() * 1000)
+                client_order_id = self._make_client_order_id(
+                    symbol=symbol,
+                    direction=direction,
+                    size_pct=approved_size,
+                    timestamp_ms=timestamp_ms
+                )
+                
+                rejected = ExecutedOrder(
+                    order_id=client_order_id,
+                    filled_pct=0.0,
+                    avg_fill_price=0.0,
+                    fee_paid=0.0,
+                    slippage_pct=0.0,
+                    note=f"REJECTED: {reason}"
+                )
+                self._executions[client_order_id] = rejected
+                
+                # Log rejection
+                from shared.audit import emit_audit_event
+                emit_audit_event(
+                    "layer5.execution.divergence_rejection",
+                    source="layer5_execution",
+                    payload={
+                        "symbol": symbol,
+                        "consensus_price": consensus_price,
+                        "venue_price": execution_venue_prices.get(execution_venue),
+                        "divergence_bps": divergence_bps,
+                        "reason": reason,
+                        "max_divergence_bps": self.max_divergence_bps
+                    }
+                )
+                
+                return rejected
 
         timestamp_ms = int(time.time() * 1000)
 
@@ -381,6 +469,7 @@ class ExecutionEngine:
             "retry_attempts": self.telemetry.retry_attempts,
             "failed_submissions": self.telemetry.failed_submissions,
             "close_all_orders": self.telemetry.close_all_orders,
+            "divergence_rejections": self.telemetry.divergence_rejections,  # NEW
             "average_fill_fraction": avg_fill_fraction,
             "average_slippage_pct": avg_slippage,
             "average_fee_paid": avg_fee,

@@ -186,6 +186,13 @@ _trust_t_availability = Gauge(
     ["symbol"]
 )
 
+_sequence_gap_histogram = Histogram(
+    "sequence_gap_distribution",
+    "Distribution of sequence gaps for gap analysis",
+    ["symbol", "exchange_id"],
+    buckets=[1, 2, 3, 5, 10, 20, 50, 100, 500, 1000]
+)
+
 
 def _parse_csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
@@ -396,22 +403,21 @@ class Layer1ValidatedService:
         if out.consensus_mid is None:
             return
 
-        primary_tick = by_ex.get(self.primary_exchange)
-        if primary_tick is None or self.primary_exchange not in out.used_sources:
-            _primary_source_skipped_total.labels(symbol=symbol).inc()
+        # NEW: Use consensus price for all downstream layers
+        # No longer filter by primary exchange - use all consensus sources
+        usable_ticks = [tick for ex, tick in by_ex.items() if ex in out.used_sources]
+        
+        if not usable_ticks:
             emit_audit_event(
-                "layer1.validated.primary_source_skipped",
+                "layer1.validated.no_usable_ticks",
                 source="layer1_validated",
                 payload={
                     "symbol": symbol,
-                    "primary_exchange": self.primary_exchange,
-                    "used_sources": out.used_sources,
                     "available_sources": sorted(str(ex) for ex in by_ex.keys()),
+                    "used_sources": out.used_sources,
                 },
             )
             return
-
-        usable_ticks = [primary_tick]
 
         tolerance = abs(out.consensus_mid) * float(self.consensus.config.divergence_tolerance)
         t2 = compute_t2(
@@ -428,25 +434,35 @@ class Layer1ValidatedService:
         spread = _median_spread(usable_ticks)
         volume_24h = _median_volume_24h(usable_ticks)
 
-        # TLS health from the primary tick (stamped by the adapter after pin verification).
-        # The adapter stamps tls_ok on each tick after checking the pin, so we read the
-        # actual verification result that traveled through Kafka.
-        tls_ok = getattr(primary_tick, 'tls_ok', False)  # Default to False if field missing
-        _tls_exchange_health.labels(symbol=symbol, exchange_id=self.primary_exchange).set(1.0 if tls_ok else 0.0)
+        # TLS health: Check if ANY exchange in consensus has healthy TLS
+        # Use the most common TLS state among consensus sources
+        tls_states = [getattr(tick, 'tls_ok', False) for tick in usable_ticks]
+        tls_ok = sum(tls_states) > len(tls_states) / 2  # Majority vote
+        
+        # Track TLS health for primary exchange (for metrics continuity)
+        primary_tick = by_ex.get(self.primary_exchange)
+        if primary_tick:
+            primary_tls_ok = getattr(primary_tick, 'tls_ok', False)
+            _tls_exchange_health.labels(symbol=symbol, exchange_id=self.primary_exchange).set(1.0 if primary_tls_ok else 0.0)
+            if not primary_tls_ok:
+                _tls_validation_failures_total.labels(symbol=symbol, exchange_id=self.primary_exchange).inc()
+        
         _active_exchange_count.labels(symbol=symbol).set(float(len(out.used_sources)))
 
         if not tls_ok:
-            _tls_validation_failures_total.labels(symbol=symbol, exchange_id=self.primary_exchange).inc()
             emit_audit_event(
-                "layer1.validated.tls_pin_health.unhealthy",
+                "layer1.validated.tls_pin_health.degraded",
                 source="layer1_validated",
-                payload={"symbol": symbol, "exchange_id": self.primary_exchange},
+                payload={"symbol": symbol, "healthy_sources": sum(tls_states), "total_sources": len(tls_states)},
             )
 
+        # Sequence gap: Use primary exchange if available, otherwise first consensus source
+        sequence_exchange = self.primary_exchange if primary_tick else out.used_sources[0]
+        sequence_tick = by_ex.get(sequence_exchange)
         sequence_gap = self._compute_sequence_gap(
             symbol=symbol,
-            exchange=self.primary_exchange,
-            sequence_id=primary_tick.sequence_id,
+            exchange=sequence_exchange,
+            sequence_id=sequence_tick.sequence_id if sequence_tick else None,
         )
 
         previous_hash = self.hashlog.tip
@@ -474,10 +490,10 @@ class Layer1ValidatedService:
         _last_trust_score.labels(symbol=symbol).set(trust_score)
         
         # === EXPORT TRUST SUBCOMPONENTS (Phase 1 Observability) ===
-        _trust_t1_tls.labels(symbol=symbol, exchange_id=self.primary_exchange).set(subscores["T1"])
+        _trust_t1_tls.labels(symbol=symbol, exchange_id=sequence_exchange).set(subscores["T1"])
         _trust_t2_consensus.labels(symbol=symbol).set(subscores["T2"])
         _trust_t3_freshness.labels(symbol=symbol).set(subscores["T3"])
-        _trust_t4_sequence.labels(symbol=symbol, exchange_id=self.primary_exchange).set(subscores["T4"])
+        _trust_t4_sequence.labels(symbol=symbol, exchange_id=sequence_exchange).set(subscores["T4"])
         _trust_t5_hashchain.labels(symbol=symbol).set(subscores["T5"])
         _trust_t_availability.labels(symbol=symbol).set(subscores.get("T_availability", 1.0))
         
@@ -518,12 +534,15 @@ class Layer1ValidatedService:
         
         # === SEQUENCE GAP HISTOGRAM ===
         if sequence_gap:
-            _sequence_gap_histogram.labels(symbol=symbol, exchange_id=self.primary_exchange).observe(sequence_gap)
+            _sequence_gap_histogram.labels(symbol=symbol, exchange_id=sequence_exchange).observe(sequence_gap)
+
+        # NEW: Build execution venue prices map for Layer 5 divergence checking
+        execution_venue_prices = {ex: tick.mid for ex, tick in by_ex.items()}
 
         tick_hash, _ = self.hashlog.append(
             symbol=symbol,
-            primary_exchange=self.primary_exchange,
-            primary_mid_price=primary_tick.mid,
+            primary_exchange=self.primary_exchange,  # Keep for backward compatibility
+            primary_mid_price=out.consensus_mid,  # Use consensus price
             consensus_mid=out.consensus_mid,
             used_sources=out.used_sources,
             divergent_sources=out.divergent_sources,
@@ -534,9 +553,10 @@ class Layer1ValidatedService:
 
         validated = ValidatedTick(
             symbol=symbol,
-            primary_exchange=self.primary_exchange,
-            mid_price=primary_tick.mid,
+            primary_exchange=self.primary_exchange,  # Deprecated but kept for compatibility
+            mid_price=out.consensus_mid,  # NEW: Use consensus price for all downstream layers
             consensus_mid=out.consensus_mid,
+            execution_venue_prices=execution_venue_prices,  # NEW: For execution-time divergence checking
             volume_24h=volume_24h,
             spread=spread,
             trust_score=trust_score,

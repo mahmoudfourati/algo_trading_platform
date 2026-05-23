@@ -11,6 +11,15 @@ services:
       - "22181:2181"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
 
   kafka:
     image: confluentinc/cp-kafka:7.6.1
@@ -36,6 +45,15 @@ services:
       - "29092:29092"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     healthcheck:
       test: ["CMD", "bash", "-lc", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
       interval: 10s
@@ -52,9 +70,24 @@ services:
       - "9100:9100"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
     depends_on:
       kafka:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   layer1-ingestion:
     build:
@@ -74,9 +107,24 @@ services:
       - "9101:9101"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       kafka:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9101/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   layer1-validated:
     build:
@@ -97,9 +145,24 @@ services:
       - "9102:9102"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       kafka:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9102/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   layer2-anomaly:
     build:
@@ -120,9 +183,24 @@ services:
       - "9103:9103"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     depends_on:
       kafka:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9103/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   layer3-strategy:
     build:
@@ -140,9 +218,24 @@ services:
       - "9104:9104"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       kafka:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9104/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   layer4-risk:
     build:
@@ -160,9 +253,24 @@ services:
       - "9105:9105"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       kafka:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9105/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   layer5-execution:
     build:
@@ -175,6 +283,8 @@ services:
       KAFKA_EXECUTED_TOPIC: "trading.orders.executed"
       KAFKA_AUTO_OFFSET_RESET: "earliest"
       EXECUTION_PERSISTENCE_DB: "/app/logs/execution_orders.db"
+      # Portfolio value in BTC equivalent (1.0 = 1 BTC worth of capital)
+      # For demo purposes, this represents the total capital available for trading
       PORTFOLIO_VALUE: "1.0"
     volumes:
       - ./logs:/app/logs
@@ -182,9 +292,24 @@ services:
       - "9106:9106"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       kafka:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9106/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   layer6-audit:
     build:
@@ -203,9 +328,24 @@ services:
       - "9107:9107"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       kafka:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9107/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   prometheus:
     image: prom/prometheus:v2.54.0
@@ -217,6 +357,15 @@ services:
       - "9090:9090"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       - metrics-service
       - layer1-ingestion
@@ -226,6 +375,12 @@ services:
       - layer4-risk
       - layer5-execution
       - layer6-audit
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   grafana:
     image: grafana/grafana:11.2.0
@@ -241,27 +396,23 @@ services:
       - "3000:3000"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     depends_on:
       - prometheus
-
-  # cadvisor:
-  #   image: gcr.io/cadvisor/cadvisor:v0.49.1
-  #   container_name: cadvisor
-  #   privileged: true
-  #   ports:
-  #     - "8080:8080"
-  #   volumes:
-  #     - /:/rootfs:ro
-  #     - /var/run:/var/run:ro
-  #     - /sys:/sys:ro
-  #     - /var/lib/docker/:/var/lib/docker:ro
-  #     - /dev/disk/:/dev/disk:ro
-  #   networks:
-  #     - trading-net
-  #   command:
-  #     - "--housekeeping_interval=10s"
-  #     - "--docker_only=true"
-  #   # Note: Disabled on Windows - requires Linux host filesystem access
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.7.0
@@ -273,22 +424,18 @@ services:
       - "--web.listen-address=:9308"
     networks:
       - trading-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
     depends_on:
       kafka:
         condition: service_healthy
-
-  # node-exporter:
-  #   image: prom/node-exporter:v1.8.1
-  #   container_name: node-exporter
-  #   ports:
-  #     - "9100:9100"
-  #   command:
-  #     - "--path.rootfs=/host"
-  #   volumes:
-  #     - /:/host:ro,rslave
-  #   networks:
-  #     - trading-net
-  #   # Note: Disabled on Windows - requires Linux host filesystem access
 
 networks:
   trading-net:

@@ -13,9 +13,32 @@ This repo implements the system described in `trading_blueprint_final.docx.md`.
 
 ### Start the stack
 
+**📚 Full Guide:** See [DOCKER_COMPOSE_GUIDE.md](DOCKER_COMPOSE_GUIDE.md) for detailed usage scenarios.
+
+**Recommended (production-like setup):**
+```powershell
+# Step 1: Start infrastructure
+docker compose up -d zookeeper kafka
+
+# Step 2: Initialize topics with explicit partition counts
+docker compose -f docker-compose.init.yml up
+
+# Step 3: Start all services
+docker compose up -d
+```
+
+**Demo/Jury Presentation Mode (faster, more visible):**
+```powershell
+# Start with demo overrides (10x faster ticks, lower thresholds, more alerts)
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d
+```
+
+**Quick start (auto-create topics - not recommended for demos):**
 ```powershell
 docker compose up -d --build
 ```
+
+Note: Auto-create may cause race conditions. Use explicit topic initialization for demos.
 
 Services:
 

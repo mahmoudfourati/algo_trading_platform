@@ -1,0 +1,83 @@
+# Purpose: Demo/presentation overrides for faster, more visible behavior
+# Usage: docker compose -f docker-compose.yml -f docker-compose.demo.yml up
+# 
+# This file overrides specific settings to make demos more impressive:
+# - Faster data generation (more ticks per second)
+# - Shorter retention (less disk usage, faster resets)
+# - Lower thresholds (more alerts and trades)
+# - More verbose logging (easier debugging during demo)
+
+services:
+  kafka:
+    environment:
+      # Demo: 10-minute retention instead of 24 hours
+      KAFKA_LOG_RETENTION_MS: "600000"
+      # Demo: Flush segments every minute instead of every hour
+      KAFKA_LOG_SEGMENT_MS: "60000"
+      # Demo: Less memory for laptop-friendly demos
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+
+  layer1-ingestion:
+    environment:
+      # Demo: Generate ticks every 100ms instead of 1000ms (10x faster)
+      TICK_INTERVAL_MS: "100"
+      # Demo: More verbose logging
+      LOG_LEVEL: "DEBUG"
+      # Demo: Focus on 2 exchanges for clearer visualization
+      EXCHANGES: "binance,bybit"
+
+  layer2-anomaly:
+    environment:
+      # Demo: Lower anomaly threshold to trigger more alerts (0.3 instead of 0.5)
+      ANOMALY_THRESHOLD: "0.3"
+      # Demo: Shorter lookback window for faster anomaly detection
+      ANOMALY_LOOKBACK_SECONDS: "30"
+      LOG_LEVEL: "DEBUG"
+
+  layer3-strategy:
+    environment:
+      # Demo: Lower signal threshold to generate more trades
+      SIGNAL_THRESHOLD: "0.6"
+      # Demo: Shorter moving average windows for faster signals
+      MA_SHORT_WINDOW: "5"
+      MA_LONG_WINDOW: "15"
+      LOG_LEVEL: "DEBUG"
+
+  layer4-risk:
+    environment:
+      # Demo: Higher risk limits to allow more trades through
+      MAX_POSITION_SIZE: "0.15"
+      MAX_PORTFOLIO_RISK: "0.25"
+      # Demo: Lower risk threshold to approve more orders
+      RISK_THRESHOLD: "0.7"
+      LOG_LEVEL: "DEBUG"
+
+  layer5-execution:
+    environment:
+      # Demo: Smaller portfolio for realistic demo numbers
+      PORTFOLIO_VALUE: "0.5"
+      # Demo: Faster execution simulation
+      EXECUTION_DELAY_MS: "50"
+      LOG_LEVEL: "DEBUG"
+
+  layer6-audit:
+    environment:
+      # Demo: Smaller audit log files (10MB instead of 100MB)
+      AUDIT_MAX_FILE_SIZE_BYTES: "10485760"
+      LOG_LEVEL: "DEBUG"
+
+  prometheus:
+    environment:
+      # Demo: Shorter retention for Prometheus metrics (2 hours instead of 15 days)
+      PROMETHEUS_RETENTION_TIME: "2h"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=2h"
+      - "--storage.tsdb.path=/prometheus"
+
+  grafana:
+    environment:
+      # Demo: Auto-refresh dashboards every 5 seconds
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: "/etc/grafana/provisioning/dashboards/algo-trading-redesigned.json"
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: "5s"
+
