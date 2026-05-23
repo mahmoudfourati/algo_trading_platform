@@ -286,6 +286,11 @@ services:
       # Portfolio value in BTC equivalent (1.0 = 1 BTC worth of capital)
       # For demo purposes, this represents the total capital available for trading
       PORTFOLIO_VALUE: "1.0"
+      # Execution divergence check (disabled by default for demo stability)
+      # Enable with ENABLE_DIVERGENCE_CHECK=true for production-grade execution validation
+      ENABLE_DIVERGENCE_CHECK: "false"
+      EXECUTION_VENUE: "binance"
+      MAX_DIVERGENCE_BPS: "50"
     volumes:
       - ./logs:/app/logs
     ports:

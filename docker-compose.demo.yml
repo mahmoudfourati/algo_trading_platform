@@ -58,6 +58,8 @@ services:
       PORTFOLIO_VALUE: "0.5"
       # Demo: Faster execution simulation
       EXECUTION_DELAY_MS: "50"
+      # Demo: Keep divergence check OFF for stability (fewer rejections)
+      ENABLE_DIVERGENCE_CHECK: "false"
       LOG_LEVEL: "DEBUG"
 
   layer6-audit:

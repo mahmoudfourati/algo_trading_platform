@@ -138,6 +138,9 @@ class Layer5Service:
                 direction = raw.get("direction", "UNKNOWN")
                 
                 try:
+                    # Feature flag: Enable/disable divergence checking
+                    enable_divergence_check = os.getenv("ENABLE_DIVERGENCE_CHECK", "false").lower() == "true"
+                    
                     # Extract divergence checking parameters
                     consensus_price = raw.get("consensus_price") or raw.get("entry_price")
                     execution_venue_prices = raw.get("execution_venue_prices", {})
@@ -153,13 +156,24 @@ class Layer5Service:
                     
                     # Track execution latency
                     start_time = time.perf_counter()
-                    executed = self.engine.submit_order(
-                        raw,
-                        reference_price=reference_price,
-                        consensus_price=consensus_price,
-                        execution_venue_prices=execution_venue_prices,
-                        execution_venue=execution_venue
-                    )
+                    
+                    # Submit order with or without divergence check based on feature flag
+                    if enable_divergence_check:
+                        # Protected mode: Check execution venue divergence
+                        executed = self.engine.submit_order(
+                            raw,
+                            reference_price=reference_price,
+                            consensus_price=consensus_price,
+                            execution_venue_prices=execution_venue_prices,
+                            execution_venue=execution_venue
+                        )
+                    else:
+                        # Simple mode: No divergence check (default for demo stability)
+                        executed = self.engine.submit_order(
+                            raw,
+                            reference_price=reference_price
+                        )
+                    
                     execution_ms = (time.perf_counter() - start_time) * 1000
                     _execution_latency_ms.labels(exchange_id=exchange_id).observe(execution_ms)
                     
