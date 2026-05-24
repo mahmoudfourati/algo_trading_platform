@@ -119,9 +119,9 @@ _feature_volume_anomaly = Gauge(
     ["symbol"]
 )
 
-_feature_trust_degradation = Gauge(
-    "anomaly_feature_trust_degradation",
-    "Feature: trust degradation signal",
+_feature_trust_score = Gauge(
+    "anomaly_feature_trust_score",
+    "Feature: current trust score (not degradation)",
     ["symbol"]
 )
 
@@ -164,41 +164,51 @@ class Layer2Service:
     consumer: KafkaConsumer
     publisher: KafkaJsonPublisher
     engine_by_symbol: dict[str, Layer2ScoringEngine]
-    gate: DecisionGate
+    gate_by_symbol: dict[str, DecisionGate]  # Per-symbol gates (not global)
+    gate_config: dict[str, float]  # Gate configuration (trust_threshold, anomaly_threshold, etc.)
     missing_data_timeout_s: float = 30.0
     _last_valid_tick_s: float = field(default_factory=time.monotonic, init=False, repr=False)
-    _watchdog_in_halt: bool = field(default=False, init=False, repr=False)
+    _watchdog_in_halt: dict[str, bool] = field(default_factory=dict, init=False, repr=False)  # Per-symbol watchdog
     _last_regime: dict[str, int] = field(default_factory=dict, init=False, repr=False)  # Phase 2
     _last_gate_state: dict[str, str] = field(default_factory=dict, init=False, repr=False)  # Phase 2
 
-    def _enter_watchdog_halt(self, *, now_s: float) -> None:
-        if self._watchdog_in_halt:
+    def _enter_watchdog_halt(self, *, symbol: str, now_s: float) -> None:
+        if self._watchdog_in_halt.get(symbol, False):
             return
 
-        previous_state = self.gate.state
-        self._watchdog_in_halt = True
-        self.gate.update(trust=0.0, anomaly=1.0)
-        _last_state.set(_STATE_NUM.get(self.gate.state, 3.0))
+        gate = self.gate_by_symbol.get(symbol)
+        if gate is None:
+            return
+
+        previous_state = gate.state
+        self._watchdog_in_halt[symbol] = True
+        gate.update(trust=0.0, anomaly=1.0)
+        _last_state.set(_STATE_NUM.get(gate.state, 3.0))
 
         if previous_state != "HALT":
             emit_audit_event(
                 "layer2.watchdog.timeout",
                 source="layer2_anomaly",
                 payload={
+                    "symbol": symbol,
                     "timeout_s": self.missing_data_timeout_s,
                     "last_valid_tick_s": self._last_valid_tick_s,
                     "triggered_at_s": now_s,
                 },
             )
 
-    def _maybe_clear_watchdog(self, *, prev_state: str) -> None:
-        if self._watchdog_in_halt and self.gate.state != "HALT":
+    def _maybe_clear_watchdog(self, *, symbol: str, prev_state: str) -> None:
+        gate = self.gate_by_symbol.get(symbol)
+        if gate is None:
+            return
+
+        if self._watchdog_in_halt.get(symbol, False) and gate.state != "HALT":
             emit_audit_event(
                 "layer2.watchdog.recovered",
                 source="layer2_anomaly",
-                payload={"previous_state": prev_state, "current_state": self.gate.state},
+                payload={"symbol": symbol, "previous_state": prev_state, "current_state": gate.state},
             )
-            self._watchdog_in_halt = False
+            self._watchdog_in_halt[symbol] = False
 
     def _process_validated_tick(self, tick: ValidatedTick) -> None:
         scorer = self.engine_by_symbol.get(tick.symbol)
@@ -210,6 +220,16 @@ class Layer2Service:
                 mad_floor=float(os.getenv("L2_MAD_FLOOR", "0.65")),
             )
             self.engine_by_symbol[tick.symbol] = scorer
+
+        # Get or create per-symbol gate
+        gate = self.gate_by_symbol.get(tick.symbol)
+        if gate is None:
+            gate = DecisionGate(
+                trust_threshold=self.gate_config["trust_threshold"],
+                anomaly_threshold=self.gate_config["anomaly_threshold"],
+                upgrade_streak_required=int(self.gate_config["upgrade_streak_required"]),
+            )
+            self.gate_by_symbol[tick.symbol] = gate
 
         # === PHASE 2: TIMING MODEL INFERENCE ===
         start_time = time.perf_counter()
@@ -224,8 +244,8 @@ class Layer2Service:
         total_inference_ms = (time.perf_counter() - start_time) * 1000
         _model_inference_latency.labels(model="total_scoring").observe(total_inference_ms)
 
-        prev_state = self.gate.state
-        system_state = self.gate.update(trust=float(tick.trust_score), anomaly=float(scores.anomaly_score))
+        prev_state = gate.state
+        system_state = gate.update(trust=float(tick.trust_score), anomaly=float(scores.anomaly_score))
 
         _last_state.set(_STATE_NUM.get(system_state, 0.0))
         _last_anomaly.labels(symbol=tick.symbol).set(float(scores.anomaly_score))
@@ -277,7 +297,7 @@ class Layer2Service:
         _feature_spread_divergence.labels(symbol=tick.symbol).set(scores.feature_spread_z)
         _feature_latency_anomaly.labels(symbol=tick.symbol).set(scores.feature_latency_z)
         _feature_volume_anomaly.labels(symbol=tick.symbol).set(scores.feature_volume_z)
-        _feature_trust_degradation.labels(symbol=tick.symbol).set(scores.feature_trust_degradation)
+        _feature_trust_score.labels(symbol=tick.symbol).set(scores.feature_trust_score)
 
         out = ScoredTick(
             symbol=tick.symbol,
@@ -305,7 +325,7 @@ class Layer2Service:
         self.publisher.publish(out.model_dump())
         _scored_out_total.inc()
         self._last_valid_tick_s = time.monotonic()
-        self._maybe_clear_watchdog(prev_state=prev_state)
+        self._maybe_clear_watchdog(symbol=tick.symbol, prev_state=prev_state)
 
     def _check_watchdog(self, *, now_s: Optional[float] = None) -> None:
         current = time.monotonic() if now_s is None else now_s
@@ -370,17 +390,19 @@ def build_service() -> Layer2Service:
     publisher = KafkaJsonPublisher(pub_cfg, client_id="layer2_anomaly")
     publisher.start()
 
-    gate = DecisionGate(
-        trust_threshold=float(os.getenv("L2_TRUST_THRESHOLD", "0.60")),
-        anomaly_threshold=float(os.getenv("L2_ANOMALY_THRESHOLD", "0.55")),
-        upgrade_streak_required=int(os.getenv("L2_UPGRADE_STREAK", "10")),
-    )
+    # Gate configuration (used to create per-symbol gates)
+    gate_config = {
+        "trust_threshold": float(os.getenv("L2_TRUST_THRESHOLD", "0.60")),
+        "anomaly_threshold": float(os.getenv("L2_ANOMALY_THRESHOLD", "0.55")),
+        "upgrade_streak_required": int(os.getenv("L2_UPGRADE_STREAK", "10")),
+    }
 
     return Layer2Service(
         consumer=consumer,
         publisher=publisher,
         engine_by_symbol={},
-        gate=gate,
+        gate_by_symbol={},  # Per-symbol gates created on-demand
+        gate_config=gate_config,
     )
 
 

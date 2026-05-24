@@ -263,7 +263,7 @@ class Layer2Scores:
     feature_spread_z: float = 0.0
     feature_latency_z: float = 0.0  # Not yet implemented
     feature_volume_z: float = 0.0
-    feature_trust_degradation: float = 0.0
+    feature_trust_score: float = 0.0  # Renamed from feature_trust_degradation (was misleading)
 
 
 class Layer2ScoringEngine:
@@ -356,9 +356,9 @@ class Layer2ScoringEngine:
         a_combined = (self._if_weight * if_score) + (self._hst_weight * hst_score)
         a_combined = _clamp01(a_combined)
 
-        # MAD guard on raw return (2-state model: normal vol regime 0, high vol regime 1).
+        # MAD guard on raw return (2-state model: regime 0=low vol, regime 1=high vol)
         mad = self._feat.mad_f1()
-        k = {0: 3.0, 1: 5.0, 2: 8.0}.get(regime.regime, 4.0)
+        k = {0: 4.0, 1: 8.0}.get(regime.regime, 4.0)  # Low vol: stricter (4σ), High vol: lenient (8σ)
         mad_guard_triggered = bool(mad > 0.0 and abs(f1_raw) > (k * mad))
 
         if mad_guard_triggered:
@@ -378,7 +378,7 @@ class Layer2ScoringEngine:
             feature_spread_z=float(f3),
             feature_latency_z=0.0,  # Not yet implemented
             feature_volume_z=float(f2),
-            feature_trust_degradation=float(trust_score),
+            feature_trust_score=float(trust_score),  # Renamed from feature_trust_degradation
         )
 
 
@@ -389,7 +389,7 @@ class DecisionGate:
         self,
         *,
         trust_threshold: float = 0.60,
-        anomaly_threshold: float = 0.80,
+        anomaly_threshold: float = 0.55,  # Match service.py default
         upgrade_streak_required: int = 10,
     ) -> None:
         self._trust_threshold = float(trust_threshold)
