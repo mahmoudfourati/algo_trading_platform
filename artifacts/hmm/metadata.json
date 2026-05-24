@@ -1,0 +1,19 @@
+{
+  "days": 90,
+  "end_date": "2026-05-23",
+  "interval": "1m",
+  "n_states": 2,
+  "points": 8640,
+  "regime_means": [
+    0.0026979834457367758,
+    0.006785879593656839
+  ],
+  "regime_order_by_mean": [
+    0,
+    1
+  ],
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ]
+}

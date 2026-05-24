@@ -248,7 +248,7 @@ class Layer2ScoringEngine:
     ) -> None:
         self._feat = RollingFeatureWindow(maxlen=500)
         self._rv = RollingRV30m()
-        self._hmm = HMMRegimeClassifier(model_path=hmm_model_path, expected_states=3)
+        self._hmm = HMMRegimeClassifier(model_path=hmm_model_path, expected_states=2)
         self._if = IsolationForestScorer()
         self._hst = HalfSpaceTreeScorer()
 

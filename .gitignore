@@ -11,6 +11,10 @@ artifacts/reports/layer1_e2e_hash_chain*.jsonl
 
 # Local runtime data/artifacts
 artifacts/
+# Exception: Keep trained HMM model for Layer 2
+!artifacts/hmm/
+!artifacts/hmm/*.pkl
+!artifacts/hmm/*.json
 data/
 logs/
 
