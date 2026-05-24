@@ -331,15 +331,34 @@ class Layer2ScoringEngine:
         tod_sin = math.sin(ang)
         tod_cos = math.cos(ang)
 
-        # Feature vector used for both IF and HST
+        # === FEATURE NORMALIZATION ===
+        # Normalize all features to comparable scales for IF/HST
+        # f1, f2, f3 are z-scored (typically [-3, 3])
+        # Normalize to [0, 1] by mapping [-3, 3] → [0, 1]
+        f1_norm = _clamp01((f1 + 3.0) / 6.0)  # Map [-3, 3] to [0, 1]
+        f2_norm = _clamp01((f2 + 3.0) / 6.0)
+        f3_norm = _clamp01((f3 + 3.0) / 6.0)
+        
+        # Regime: already in [0, 1] for 2-state model (0 or 1)
+        # Normalize to [0, 1]: 0 → 0.0, 1 → 1.0
+        regime_norm = float(regime.regime) / 1.0  # For 2-state: 0→0.0, 1→1.0
+        
+        # Trust: already in [0, 1]
+        trust_norm = float(trust_score)
+        
+        # Time of day: map [-1, 1] to [0, 1]
+        tod_sin_norm = (tod_sin + 1.0) / 2.0
+        tod_cos_norm = (tod_cos + 1.0) / 2.0
+
+        # Feature vector used for both IF and HST (all features now in [0, 1])
         feat_dict = {
-            "f1": float(f1),
-            "f2": float(f2),
-            "f3": float(f3),
-            "regime": float(regime.regime),
-            "trust": float(trust_score),
-            "tod_sin": float(tod_sin),
-            "tod_cos": float(tod_cos),
+            "f1": float(f1_norm),
+            "f2": float(f2_norm),
+            "f3": float(f3_norm),
+            "regime": float(regime_norm),
+            "trust": float(trust_norm),
+            "tod_sin": float(tod_sin_norm),
+            "tod_cos": float(tod_cos_norm),
         }
 
         vec = np.array(

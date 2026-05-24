@@ -880,7 +880,7 @@ _feature_extraction_latency.labels(symbol=symbol).observe((time.perf_counter() -
 |---|-------|----------|--------|--------|----------|--------|
 | 1 | Service crashes without HMM model | CRITICAL | Blocks startup | Low | 1 | ✅ FIXED |
 | 2 | IF normalization undocumented | HIGH | Unclear algorithm | Low | 2 | ✅ FIXED |
-| 3 | No feature normalization | HIGH | Biased anomaly scores | Medium | 3 | |
+| 3 | No feature normalization | HIGH | Biased anomaly scores | Medium | 3 | ✅ FIXED |
 | 4 | Regime classification unused | HIGH | Wasted computation | Medium | 4 | |
 | 5 | Kafka hop adds latency | HIGH | 5-10ms per tick | High | 5 (defer) | |
 | 6 | Decision gate thresholds hardcoded | MEDIUM | Can't tune | Low | 6 | |
