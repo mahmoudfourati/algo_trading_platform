@@ -511,6 +511,42 @@ class TestIsolationForestScorer:
 
         assert scorer._model is not None, "IF model was not swapped in after async retrain"
 
+    def test_if_score_range_and_normalization(self) -> None:
+        """Verify IF scores are always in [0, 1] range and normalization is correct."""
+        scorer = IsolationForestScorer(warmup_min_samples=20, max_training_buffer=128, retrain_interval_s=900)
+
+        # Add training samples (normal distribution around 0.005)
+        for i in range(30):
+            vec = np.array([0.005 + 0.001 * (i % 10 - 5), 5.0, 2.0, 0.0, 0.8, 0.5, 0.5], dtype=float)
+            scorer.add_training_sample(vec)
+
+        # Force training
+        scorer._train()
+        assert scorer._model is not None, "Model should be trained"
+
+        # Test 1: Normal point (similar to training data)
+        normal_vec = np.array([0.005, 5.0, 2.0, 0.0, 0.8, 0.5, 0.5], dtype=float)
+        normal_score = scorer.score(normal_vec)
+        assert 0.0 <= normal_score <= 1.0, f"Normal score {normal_score} out of [0, 1] range"
+        assert normal_score < 0.6, f"Normal point should have low anomaly score, got {normal_score}"
+
+        # Test 2: Anomaly point (very different from training data)
+        anomaly_vec = np.array([0.5, 50.0, 20.0, 1.0, 0.2, 0.9, 0.1], dtype=float)
+        anomaly_score = scorer.score(anomaly_vec)
+        assert 0.0 <= anomaly_score <= 1.0, f"Anomaly score {anomaly_score} out of [0, 1] range"
+        assert anomaly_score > normal_score, f"Anomaly should score higher than normal: {anomaly_score} vs {normal_score}"
+
+        # Test 3: Multiple diverse points all stay in range
+        test_vecs = [
+            np.array([0.001, 4.0, 1.0, 0.0, 0.9, 0.3, 0.7], dtype=float),
+            np.array([0.010, 6.0, 3.0, 1.0, 0.7, 0.6, 0.4], dtype=float),
+            np.array([0.100, 10.0, 10.0, 1.0, 0.5, 0.8, 0.2], dtype=float),
+        ]
+        for vec in test_vecs:
+            score = scorer.score(vec)
+            assert 0.0 <= score <= 1.0, f"Score {score} for vec {vec} out of [0, 1] range"
+            assert math.isfinite(score), f"Score {score} is not finite"
+
 
 # ============================================================================
 # 6. LAYER 2 SCORING ENGINE INTEGRATION TEST

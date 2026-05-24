@@ -199,13 +199,42 @@ class IsolationForestScorer:
         threading.Thread(target=self._train, name="iforest-train", daemon=True).start()
 
     def score(self, vec: np.ndarray) -> float:
+        """
+        Compute anomaly score in [0, 1] range using sklearn's IsolationForest.
+        
+        sklearn's IsolationForest.decision_function() returns:
+        - Negative values for anomalies (more negative = more anomalous)
+        - Positive values for normal points (more positive = more normal)
+        - Typical range: [-0.5, +0.5] (but can exceed this range)
+        
+        Conversion formula:
+            anomaly_score = clamp(1.0 - (decision_function + 0.5), 0, 1)
+        
+        This mapping ensures:
+            df = -0.5 (strong anomaly) → score = 1.0
+            df =  0.0 (neutral)        → score = 0.5
+            df = +0.5 (normal)         → score = 0.0
+        
+        The +0.5 offset centers the typical range at 0.5, and the
+        1.0 - x inversion converts "more negative = anomaly" to
+        "higher score = anomaly". The clamp ensures output stays in [0, 1].
+        
+        Reference: sklearn.ensemble.IsolationForest documentation
+        https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html
+        
+        Args:
+            vec: Feature vector (7 features: f1, f2, f3, regime, trust, tod_sin, tod_cos)
+        
+        Returns:
+            Anomaly score in [0, 1] where 0=normal, 1=anomaly
+        """
         with self._lock:
             model = self._model
         if model is None:
             return 0.0
 
         df = float(model.decision_function(vec.reshape(1, -1))[0])
-        # Blueprint normalization: clip(1.0 - (decision_function + 0.5), 0, 1)
+        # Convert sklearn's decision_function to [0, 1] anomaly score
         return _clamp01(1.0 - (df + 0.5))
 
 

@@ -137,6 +137,31 @@ class IsolationForestScorer:
 
 **Weights in ensemble:** 45%
 
+#### Isolation Forest Score Normalization
+
+sklearn's `IsolationForest.decision_function()` returns anomaly scores where:
+- **Negative values** indicate anomalies (more negative = more anomalous)
+- **Positive values** indicate normal points (more positive = more normal)
+- **Typical range**: [-0.5, +0.5] (but can exceed this range)
+
+We convert this to a [0, 1] anomaly score using:
+
+```python
+anomaly_score = clamp(1.0 - (decision_function + 0.5), 0, 1)
+```
+
+**This mapping ensures:**
+- Strong anomalies (df ≈ -0.5) → score ≈ 1.0
+- Normal points (df ≈ +0.5) → score ≈ 0.0
+- Neutral points (df ≈ 0.0) → score ≈ 0.5
+
+**Rationale:**
+1. The `+0.5` offset centers the typical range at 0.5
+2. The `1.0 - x` inversion converts "more negative = anomaly" to "higher score = anomaly"
+3. The `clamp()` ensures output stays in [0, 1] even if decision_function exceeds typical range
+
+**Reference:** [sklearn.ensemble.IsolationForest](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html)
+
 ---
 
 ### 5. Half-Space Trees Scorer (HalfSpaceTreeScorer)
