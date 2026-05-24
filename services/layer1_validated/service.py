@@ -435,9 +435,10 @@ class Layer1ValidatedService:
         volume_24h = _median_volume_24h(usable_ticks)
 
         # TLS health: Check if ANY exchange in consensus has healthy TLS
-        # Use the most common TLS state among consensus sources
+        # Use pessimistic TLS health (all must be healthy)
+        # Security-focused: if ANY exchange has bad TLS, trust should degrade
         tls_states = [getattr(tick, 'tls_ok', False) for tick in usable_ticks]
-        tls_ok = sum(tls_states) > len(tls_states) / 2  # Majority vote
+        tls_ok = all(tls_states) if tls_states else False
         
         # Track TLS health for primary exchange (for metrics continuity)
         primary_tick = by_ex.get(self.primary_exchange)
@@ -456,20 +457,38 @@ class Layer1ValidatedService:
                 payload={"symbol": symbol, "healthy_sources": sum(tls_states), "total_sources": len(tls_states)},
             )
 
-        # Sequence gap: Use primary exchange if available, otherwise first consensus source
-        sequence_exchange = self.primary_exchange if primary_tick else out.used_sources[0]
-        sequence_tick = by_ex.get(sequence_exchange)
-        sequence_gap = self._compute_sequence_gap(
-            symbol=symbol,
-            exchange=sequence_exchange,
-            sequence_id=sequence_tick.sequence_id if sequence_tick else None,
-        )
+        # Sequence gap tracking for ALL exchanges
+        # Compute T4 for each exchange that has sequence IDs, then aggregate
+        sequence_gaps = {}
+        for exchange, tick in by_ex.items():
+            if tick.sequence_id is not None:
+                gap = self._compute_sequence_gap(
+                    symbol=symbol,
+                    exchange=exchange,
+                    sequence_id=tick.sequence_id,
+                )
+                sequence_gaps[exchange] = gap
+        
+        # Aggregate sequence gap for trust scoring
+        # Use the WORST (maximum) gap among all exchanges
+        # This is conservative: if ANY exchange has gaps, trust degrades
+        if sequence_gaps:
+            sequence_gap = max(sequence_gaps.values())
+        else:
+            sequence_gap = None
 
         previous_hash = self.hashlog.tip
         chain_ok = True  # previous_hash is taken from current tip.
 
         # Compute availability score
         active_exchanges_set = set(out.used_sources)
+        
+        # Exclude exchanges that are silent (detected by liveness monitor)
+        # If an exchange hasn't sent a tick in >30s, it's using stale LKV data
+        # and should not be counted as "active" for T_availability
+        for silent_exchange in self._last_liveness_overdue.keys():
+            active_exchanges_set.discard(silent_exchange)
+        
         configured_exchanges_set = set(self.enabled_exchanges)
         
         subscores = compute_subscores(

@@ -1,0 +1,33 @@
+# Consensus alignment window configuration
+# 
+# Controls how long Layer 1 waits to collect ticks from multiple exchanges
+# before computing consensus price.
+#
+# Lower values = faster updates, less time for all exchanges to report
+# Higher values = more exchanges included, slower updates
+#
+# Typical values:
+#   10-30ms: High-frequency trading (may miss some exchanges)
+#   50ms: Standard (good balance)
+#   100-200ms: Conservative (ensures all exchanges report)
+
+# Default window for all symbols (milliseconds)
+default_window_ms: 50
+
+# Per-symbol overrides
+# Format: "SYMBOL": window_ms
+symbol_overrides:
+  # High-frequency symbols (faster updates)
+  BTC-USDT: 30
+  ETH-USDT: 30
+  
+  # Standard symbols (default)
+  # SOL-USDT: 50
+  
+  # Low-frequency symbols (more time for exchanges)
+  # DOGE-USDT: 100
+
+# Notes:
+# - Shorter windows may result in fewer exchanges in consensus
+# - Longer windows increase latency but improve consensus quality
+# - Changes require service restart (or SIGHUP if implemented)

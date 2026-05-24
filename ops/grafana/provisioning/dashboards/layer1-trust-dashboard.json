@@ -86,7 +86,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "expr": "rate(layer1_validated_out_total[1m])",
+          "expr": "rate(layer1_merged_out_total[1m])",
           "legendFormat": "ticks/sec",
           "refId": "A"
         }
@@ -112,7 +112,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "expr": "layer1_validated_out_total",
+          "expr": "layer1_merged_out_total",
           "legendFormat": "Validated Out",
           "refId": "A"
         },
@@ -162,7 +162,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "expr": "layer1_validated_last_trust_score",
+          "expr": "layer1_merged_last_trust_score",
           "legendFormat": "{{symbol}}",
           "refId": "A"
         }
@@ -191,7 +191,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "prometheus"},
-          "expr": "layer1_validated_last_trust_score",
+          "expr": "layer1_merged_last_trust_score",
           "legendFormat": "{{symbol}}",
           "refId": "A"
         }
@@ -840,3 +840,4 @@
   "templating": {"list": []},
   "style": "dark"
 }
+

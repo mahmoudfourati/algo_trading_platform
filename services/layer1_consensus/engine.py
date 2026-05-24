@@ -8,12 +8,15 @@ from __future__ import annotations
 import dataclasses
 import time
 from collections import defaultdict
-from typing import DefaultDict, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from shared.audit import emit_audit_event
 from shared.schemas import ExchangeId, NormalizedTick
+
+if TYPE_CHECKING:
+    from .window_config import ConsensusWindowConfig
 
 
 LKV_STALENESS_MS = 15_000
@@ -202,16 +205,44 @@ def _is_divergent(value: float, median: float, tolerance: float) -> bool:
 
 
 class TickAligner:
-    """Align ticks per-symbol into a small aggregation window (default 50ms)."""
+    """Align ticks per-symbol into configurable aggregation windows.
+    
+    Supports per-symbol window configuration for different trading strategies.
+    """
 
-    def __init__(self, *, window_ms: int) -> None:
-        self.window_ms = int(window_ms)
+    def __init__(
+        self,
+        *,
+        window_ms: int = 50,
+        window_config: Optional["ConsensusWindowConfig"] = None,
+    ) -> None:
+        """Initialize TickAligner.
+        
+        Args:
+            window_ms: Default window size in milliseconds (used if window_config not provided)
+            window_config: Optional per-symbol window configuration
+        """
+        self.default_window_ms = int(window_ms)
+        self.window_config = window_config
         self._buf: DefaultDict[str, List[NormalizedTick]] = defaultdict(list)
         self._window_start_ms: Dict[str, int] = {}
 
         # Per-symbol last-known-value registry (exchange -> latest tick) + last-seen timestamps.
         self._lkv: DefaultDict[str, Dict[ExchangeId, NormalizedTick]] = defaultdict(dict)
         self._lkv_ts: DefaultDict[str, Dict[ExchangeId, float]] = defaultdict(dict)
+    
+    def get_window_ms(self, symbol: str) -> int:
+        """Get alignment window for a symbol.
+        
+        Args:
+            symbol: Symbol name (e.g., "BTC-USDT")
+            
+        Returns:
+            Window size in milliseconds
+        """
+        if self.window_config is not None:
+            return self.window_config.get_window_ms(symbol)
+        return self.default_window_ms
 
     def add(self, tick: NormalizedTick) -> List["AlignedWindow"]:
         symbol = tick.symbol
@@ -242,7 +273,10 @@ class TickAligner:
             start = self._window_start_ms.get(symbol)
             if start is None:
                 continue
-            if now_ms - start < self.window_ms:
+            
+            # Use per-symbol window size
+            window_ms = self.get_window_ms(symbol)
+            if now_ms - start < window_ms:
                 continue
 
             ticks = self._buf.pop(symbol, [])

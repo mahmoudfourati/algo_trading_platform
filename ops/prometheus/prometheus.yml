@@ -19,21 +19,22 @@ alerting:
 
 scrape_configs:
   # Application Layer Services
-  - job_name: "layer1-ingestion"
+  - job_name: "layer1-merged"
     metrics_path: /metrics
     static_configs:
-      - targets: ["layer1-ingestion:9101"]
+      - targets: ["layer1-merged:9101"]
         labels:
           layer: "layer1"
-          service: "ingestion"
+          service: "merged"
 
-  - job_name: "layer1-validated"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["layer1-validated:9102"]
-        labels:
-          layer: "layer1"
-          service: "validated"
+  # DEPRECATED: Old layer1-validated job (metrics now in layer1-merged)
+  # - job_name: "layer1-validated"
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["layer1-validated:9102"]
+  #       labels:
+  #         layer: "layer1"
+  #         service: "validated"
 
   - job_name: "layer2-anomaly"
     metrics_path: /metrics

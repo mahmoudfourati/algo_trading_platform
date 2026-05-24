@@ -50,13 +50,29 @@ def load_trust_weights(path: Optional[str] = None) -> TrustWeights:
     """Load weights from a JSON file.
 
     Path defaults to env TRUST_WEIGHTS_PATH, then config/trust_weights.json.
+    
+    Validates that:
+    - All weights are non-negative
+    - Weights sum to 1.0 (within 0.01 tolerance)
+    
+    Raises:
+        ValueError: If validation fails
+        FileNotFoundError: If weights file doesn't exist
+        json.JSONDecodeError: If weights file is invalid JSON
     """
 
     weights_path = path or os.getenv("TRUST_WEIGHTS_PATH", os.path.join("config", "trust_weights.json"))
-    with open(weights_path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    
+    try:
+        with open(weights_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Trust weights file not found: {weights_path}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in trust weights file: {e}")
 
-    return TrustWeights(
+    # Extract weights with defaults for backward compatibility
+    weights = TrustWeights(
         w1_tls=float(raw["w1_tls"]),
         w2_consensus=float(raw["w2_consensus"]),
         w3_freshness=float(raw["w3_freshness"]),
@@ -64,6 +80,39 @@ def load_trust_weights(path: Optional[str] = None) -> TrustWeights:
         w5_hash_chain=float(raw["w5_hash_chain"]),
         w_availability=float(raw.get("w_availability", 0.1)),  # Default 0.1 for backward compat
     )
+    
+    # Validation 1: All weights must be non-negative
+    weight_values = [
+        weights.w1_tls,
+        weights.w2_consensus,
+        weights.w3_freshness,
+        weights.w4_sequence,
+        weights.w5_hash_chain,
+        weights.w_availability,
+    ]
+    
+    for i, (name, value) in enumerate([
+        ("w1_tls", weights.w1_tls),
+        ("w2_consensus", weights.w2_consensus),
+        ("w3_freshness", weights.w3_freshness),
+        ("w4_sequence", weights.w4_sequence),
+        ("w5_hash_chain", weights.w5_hash_chain),
+        ("w_availability", weights.w_availability),
+    ]):
+        if value < 0:
+            raise ValueError(f"Trust weight '{name}' must be non-negative, got {value}")
+    
+    # Validation 2: Weights must sum to 1.0 (within tolerance)
+    total = sum(weight_values)
+    tolerance = 0.01
+    
+    if abs(total - 1.0) > tolerance:
+        raise ValueError(
+            f"Trust weights must sum to 1.0 (±{tolerance}), got {total:.4f}. "
+            f"Weights: {weights.as_dict()}"
+        )
+    
+    return weights
 
 
 def t1_tls_validity(*, tls_ok: bool) -> float:

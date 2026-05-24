@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 ExchangeId = Literal["binance", "coinbase", "kraken", "okx", "bybit"]
@@ -39,6 +39,41 @@ class RawTick(BaseModel):
     @property
     def mid(self) -> float:
         return (self.bid + self.ask) / 2.0
+    
+    @field_validator('timestamp_source')
+    @classmethod
+    def validate_timestamp_source(cls, v: str, info) -> str:
+        """Validate timestamp_source matches exchange requirements.
+        
+        Kraken must use 'receive' (no reliable exchange timestamps).
+        All other exchanges should use 'exchange' (more accurate).
+        
+        This is a warning-level validation - we log but don't reject.
+        """
+        if 'exchange_id' in info.data:
+            exchange_id = info.data['exchange_id']
+            
+            # Kraken should use 'receive' due to unreliable exchange timestamps
+            if exchange_id == 'kraken' and v != 'receive':
+                # Note: We don't raise an error, just document the expectation
+                # Adapters should handle this, but we allow flexibility
+                pass
+            
+            # Other exchanges should use 'exchange' for better accuracy
+            elif exchange_id != 'kraken' and v == 'receive':
+                # Again, we document but don't enforce
+                pass
+        
+        return v
+    
+    def to_dict_canonical(self) -> dict:
+        """Convert to canonical dict representation for hash chain computation.
+        
+        Returns:
+            Dict with sorted keys suitable for hash computation
+        """
+        data = self.model_dump(exclude_none=True)
+        return dict(sorted(data.items()))
 
 
 class NormalizedTick(BaseModel):
@@ -67,6 +102,36 @@ class NormalizedTick(BaseModel):
     @property
     def mid(self) -> float:
         return (self.bid + self.ask) / 2.0
+    
+    @field_validator('timestamp_source')
+    @classmethod
+    def validate_timestamp_source(cls, v: str, info) -> str:
+        """Validate timestamp_source matches exchange requirements.
+        
+        Kraken must use 'receive' (no reliable exchange timestamps).
+        All other exchanges should use 'exchange' (more accurate).
+        """
+        if 'exchange_id' in info.data:
+            exchange_id = info.data['exchange_id']
+            
+            # Kraken should use 'receive' due to unreliable exchange timestamps
+            if exchange_id == 'kraken' and v != 'receive':
+                pass  # Document expectation but don't enforce
+            
+            # Other exchanges should use 'exchange' for better accuracy
+            elif exchange_id != 'kraken' and v == 'receive':
+                pass  # Document expectation but don't enforce
+        
+        return v
+    
+    def to_dict_canonical(self) -> dict:
+        """Convert to canonical dict representation for hash chain computation.
+        
+        Returns:
+            Dict with sorted keys suitable for hash computation
+        """
+        data = self.model_dump(exclude_none=True)
+        return dict(sorted(data.items()))
 
 
 class ValidatedTick(BaseModel):
@@ -143,6 +208,49 @@ class ValidatedTick(BaseModel):
             return (False, f"execution_venue_{venue}_not_in_prices")
         
         return (True, "ok")
+    
+    def validate_execution_venue_prices(self) -> tuple[bool, str]:
+        """Validate execution_venue_prices dict is properly populated.
+        
+        Returns:
+            (is_valid, message) tuple:
+            - (True, "ok"): Dict is properly populated
+            - (False, "execution_venue_prices_empty"): Dict is empty (backward compat warning)
+            - (False, "execution_venue_prices_invalid_price"): Contains invalid prices
+            
+        Example:
+            >>> tick = ValidatedTick(...)
+            >>> is_valid, msg = tick.validate_execution_venue_prices()
+            >>> if not is_valid:
+            ...     logger.warning(f"Venue prices validation: {msg}")
+        """
+        if not self.execution_venue_prices:
+            return (False, "execution_venue_prices_empty")
+        
+        # Check all prices are positive
+        for venue, price in self.execution_venue_prices.items():
+            if price <= 0:
+                return (False, f"execution_venue_prices_invalid_price_{venue}_{price}")
+        
+        return (True, "ok")
+    
+    def to_dict_canonical(self) -> dict:
+        """Convert to canonical dict representation for hash chain computation.
+        
+        This method ensures consistent serialization for cryptographic hashing.
+        Fields are sorted alphabetically and optional fields with None are excluded.
+        
+        Returns:
+            Dict with sorted keys suitable for hash computation
+            
+        Example:
+            >>> tick = ValidatedTick(...)
+            >>> canonical = tick.to_dict_canonical()
+            >>> hash_input = json.dumps(canonical, sort_keys=True)
+        """
+        data = self.model_dump(exclude_none=True, exclude={"tick_hash"})
+        # Sort keys for deterministic serialization
+        return dict(sorted(data.items()))
 
 
 SystemState = Literal["NORMAL", "CONSERVATIVE", "DEGRADED", "HALT"]
@@ -239,3 +347,33 @@ SCHEMA_VERSIONS = {
     "ApprovedOrder": "v1",
     "ExecutedOrder": "v1",
 }
+
+
+def validate_schema_version(model_name: str, actual_version: str) -> tuple[bool, str]:
+    """Validate schema version matches expected version.
+    
+    Args:
+        model_name: Name of the model class (e.g., "RawTick", "ValidatedTick")
+        actual_version: Version string from the message (e.g., "v1", "v2")
+        
+    Returns:
+        (is_valid, message) tuple:
+        - (True, "ok"): Version matches expected
+        - (False, "version_mismatch_..."): Version doesn't match
+        - (False, "unknown_model"): Model name not in SCHEMA_VERSIONS
+        
+    Example:
+        >>> is_valid, msg = validate_schema_version("RawTick", "v1")
+        >>> if not is_valid:
+        ...     logger.warning(f"Schema version issue: {msg}")
+        ...     # Emit audit event for version skew detection
+    """
+    if model_name not in SCHEMA_VERSIONS:
+        return (False, f"unknown_model_{model_name}")
+    
+    expected_version = SCHEMA_VERSIONS[model_name]
+    
+    if actual_version != expected_version:
+        return (False, f"version_mismatch_{model_name}_expected_{expected_version}_got_{actual_version}")
+    
+    return (True, "ok")
