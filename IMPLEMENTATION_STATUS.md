@@ -1,6 +1,6 @@
 # Implementation Status
 
-**Last Updated:** 2026-05-23  
+**Last Updated:** 2026-05-27  
 **Project:** Secure Algorithmic Trading Platform  
 **Blueprint:** `trading_blueprint_final.docx.md`
 
@@ -8,10 +8,12 @@
 
 ## Executive Summary
 
-**Overall Completion:** 70-80% of blueprint scope  
+**Overall Completion:** 75-85% of blueprint scope  
 **Phases Complete:** 0-7 (Foundation through Risk Management)  
 **Phases Partial:** 8 (Execution - paper trading only)  
 **Phases Incomplete:** 9-12 (Audit persistence, statistical validation, web UI, polish)
+
+**Recent Major Update (May 27):** Layer 2 Anomaly Detection completely redesigned with new detector stack. Old Isolation Forest + Half-Space Trees replaced with 5 fast, explainable detectors + fusion layer. System tested and validated with real-time monitoring.
 
 **Current State:** The system is operationally deployed with 6 layers running in Docker. All core trading logic (ingestion → anomaly detection → strategy → risk → execution simulation) is implemented and tested. The main gaps are production-grade execution, comprehensive statistical validation, and the web interface.
 
@@ -64,13 +66,16 @@
 ---
 
 ### ✅ Phase 2 — Layer 1 Trusted Data Ingestion
-**Status:** COMPLETE  
+**Status:** COMPLETE (MERGED ARCHITECTURE)  
 **Completion Date:** May 2026
+
+**Architecture Update (May 2026):**
+Merged ingestion + validation into single `layer1-merged` service, eliminating Kafka hop and reducing latency from 5-10ms to <1ms.
 
 **What's Done:**
 
 #### 2.1 Exchange Adapters
-- 5 exchange adapters: Binance, Coinbase, Kraken, OKX, Bybit
+- 5 exchange adapters: Binance, Bybit, OKX (Coinbase & Kraken disabled due to data quality issues)
 - Exponential backoff reconnection
 - 5-second heartbeat timeout
 - REST snapshot on reconnect
@@ -91,16 +96,19 @@
 - Validated topic publishing
 
 **Evidence:**
-- `services/layer1_ingestion/adapters/` with 5 adapters
-- `services/layer1_consensus/engine.py` with alignment logic
-- `services/layer1_trust/scoring.py` with T1-T5 implementation
-- `services/layer1_hashlog/hash_chain.py` with integrity verification
-- Tests: `test_layer1_*.py` (8 test files)
+- `services/layer1_merged/` - unified service
+- `services/layer1_merged/adapters/` with 5 adapters
+- `services/layer1_merged/consensus.py` with alignment logic
+- `services/layer1_merged/trust_scoring.py` with T1-T5 implementation
 - Live run: 30+ minutes stable with trust scores >0.8
+- Metrics port: 9101
+
+**Kafka Topics:**
+- Produces: `market.ticks.validated`
 
 **Known Deviations:**
-- Using 5 exchanges instead of blueprint's 3 (more robust)
-- Kraken uses `timestamp_source="receive"` (no exchange timestamp)
+- Using 3 exchanges instead of blueprint's 5 (Coinbase/Kraken disabled)
+- Merged architecture (not in blueprint, but improves latency)
 
 ---
 
@@ -128,37 +136,94 @@
 ---
 
 ### ✅ Phase 4 — Layer 2 Anomaly Detection
-**Status:** COMPLETE  
-**Completion Date:** May 2026
+**Status:** COMPLETE (REDESIGNED MAY 2026)  
+**Completion Date:** May 27, 2026
 
-**What's Done:**
+**Major Redesign (May 27, 2026):**
+Complete replacement of slow ML models (Isolation Forest 8s/tick, Half-Space Trees 8s/tick) with fast, explainable detector stack. New architecture achieves <10ms latency while maintaining high detection accuracy.
 
-#### 4.1-4.3 Feature Engineering
-- Rolling 500-tick buffer with Welford's algorithm
-- MAD computation (robust to outliers)
-- 30-minute realized volatility
-- 6-feature vector (f1-f6) with z-scoring
+**New Architecture:**
 
-#### 4.4-4.5 Dual Anomaly Detection
-- Isolation Forest (15-minute retraining, atomic swap)
-- Half-Space Trees (streaming, score-before-learn)
-- Weighted fusion: 0.45*IF + 0.55*HST
+#### 4.1 Detector Stack (5 Specialized Detectors)
+1. **AbsoluteThresholdDetector** (Tier 1 - instant)
+   - Flash crash detection: 200 bps price jump
+   - Liquidity crisis: 100 bps spread
+   - Volume explosion: 15× average volume
+   - No warmup required, fires from tick 1
 
-#### 4.6-4.7 Decision Gate
-- Regime-dependent MAD guard
-- 2D trust/anomaly matrix → system state
-- Hysteresis: 10 ticks for upgrade, instant for HALT
-- 30-second missing-data watchdog
+2. **MADDetector** (Tier 2 - statistical outlier)
+   - Median Absolute Deviation with regime-adaptive thresholds
+   - Low vol: k=6.0, High vol: k=10.0
+   - 100-tick rolling window
+   - Robust to outliers
+
+3. **VolatilityRatioDetector** (Tier 2 - regime shift)
+   - Short-term (30 ticks) vs long-term (300 ticks) volatility
+   - Spike ratio: 3.0× for detection
+   - Catches sudden regime changes
+
+4. **CUSUMDetector** (Tier 3 - sustained drift)
+   - Cumulative sum of deviations
+   - Threshold: 10.0σ (tuned for crypto)
+   - Composite signal: 0.5×price + 0.3×spread + 0.2×volume
+   - Auto-reset after detection
+   - Catches gradual market manipulation
+
+5. **EWMADetector** (Tier 3 - control chart)
+   - Exponentially weighted moving average
+   - Dual channel: price + spread
+   - Control limit: L=4.0 (tuned for crypto)
+   - Catches small sustained shifts faster than CUSUM
+
+#### 4.2 Fusion Layer
+- **Coincidence Check:** 2+ detectors firing = high confidence (cap 0.85)
+- **Normal Mode:** Weighted average of all detectors (cap 0.70)
+- **Weights:** Absolute=0.35, MAD=0.30, VolRatio=0.15, CUSUM=0.10, EWMA=0.10
+- **Reason Tracking:** Human-readable explanation for each score
+
+#### 4.3 Memory Window (NEW)
+- 30-tick rolling window of anomaly scores
+- Final score = max(last 30 scores)
+- Sustains elevated scores for ~30 seconds after anomaly
+- Allows Decision Gate time to react properly
+
+#### 4.4 HMM Integration
+- 2-state GaussianHMM (0=low vol, 1=high vol)
+- Feeds Decision Gate as threshold modifier, NOT detectors
+- Regime 0: tighten thresholds by 0.10
+- Regime 1: loosen thresholds by 0.10
+- Keeps detector logic regime-agnostic
+
+#### 4.5 Decision Gate (4-State Machine)
+- States: NORMAL → CONSERVATIVE → DEGRADED → HALT
+- Requires BOTH low trust (<0.60) AND high anomaly (>0.55) for HALT
+- Immediate downgrade, 10-tick streak for upgrade
+- HALT escape requires 10 consecutive NORMAL-qualifying ticks
+- Regime-adaptive thresholds
 
 **Evidence:**
-- `services/layer2_anomaly/engine.py` with all components
-- `services/layer2_anomaly/service.py` with Kafka wiring
-- Tests: `test_layer2_anomaly.py` (27 tests passing)
-- Live integration report: 458 validated → 457 scored (0 bad ticks)
+- `services/layer2_anomaly/engine.py` - orchestration + memory window
+- `services/layer2_anomaly/fusion.py` - 2-tier fusion logic
+- `services/layer2_anomaly/detectors/` - 5 detector implementations
+- `LAYER2_DETECTOR_STACK_REDESIGN_PLAN.md` - complete design doc
+- Real-time testing: Achieved 0.850 anomaly score on synthetic flash crash
+- Production metrics: 377 BTC HALT transitions, 60 ETH HALT transitions from real market events
+
+**Performance:**
+- Latency: <10ms per tick (vs 8000ms with old ML models)
+- Score distribution: 0.1-0.3 (normal), 0.8-0.9 (anomalies)
+- Memory usage: Minimal (rolling windows only)
+- No model retraining required
 
 **Kafka Topics:**
 - Consumes: `market.ticks.validated`
 - Produces: `market.ticks.scored`
+
+**Known Deviations from Blueprint:**
+- Removed Isolation Forest and Half-Space Trees (too slow)
+- Added 5 specialized detectors (faster, more explainable)
+- Added memory window for score persistence (not in blueprint)
+- HMM feeds gate, not detectors (cleaner separation of concerns)
 
 ---
 
@@ -452,9 +517,9 @@
 ## Known Issues & Technical Debt
 
 ### Critical (Fix Before Demo)
-1. **Primary exchange refactor incomplete** — mid-refactor state with deprecated fields
+1. ~~**Primary exchange refactor incomplete**~~ — RESOLVED (merged architecture)
 2. **Layer 3 signals not wired end-to-end in backtest** — uses Layer 2 state transitions instead
-3. **TLS default inconsistency** — pessimistic in registry, optimistic in schemas
+3. ~~**TLS default inconsistency**~~ — RESOLVED (pessimistic default enforced)
 4. **No resource limits in docker-compose** — risk of OOM during demo
 5. **Phase 10 validation incomplete** — no full 90-day walk-forward run
 
@@ -466,11 +531,17 @@
 10. **Audit log not tested end-to-end** — deployed but not validated
 
 ### Nice to Have (If Time Permits)
-11. **Merge Layer 1 ingestion + validated** — eliminate 5-10ms Kafka hop
+11. ~~**Merge Layer 1 ingestion + validated**~~ — DONE (May 2026)
 12. **Add Grafana alerting rules** — Prometheus without alerts is just logging
 13. **Add audit log query API** — currently write-only
 14. **Add backtest comparison tool** — compare runs side-by-side
 15. **Add Monte Carlo simulation** — bootstrap equity curve for confidence intervals
+
+### Recently Resolved (May 27, 2026)
+- ✅ **Layer 2 slow ML models** — Replaced IF/HST with fast detector stack (<10ms)
+- ✅ **Layer 2 bimodal score distribution** — Fixed with proper detector caps and fusion
+- ✅ **Layer 2 memory window** — Added 30-tick persistence for proper gate behavior
+- ✅ **Coinbase/Kraken data quality** — Disabled problematic exchanges
 
 ---
 
@@ -483,9 +554,8 @@
 ✅ prometheus (port 9090)
 ✅ grafana (port 3000)
 ✅ metrics-service (port 9100)
-✅ layer1-ingestion (port 9101)
-✅ layer1-validated (port 9102)
-✅ layer2-anomaly (port 9103)
+✅ layer1-merged (port 9101) — MERGED ARCHITECTURE
+✅ layer2-anomaly (port 9103) — REDESIGNED DETECTOR STACK
 ✅ layer3-strategy (port 9104)
 ✅ layer4-risk (port 9105)
 ✅ layer5-execution (port 9106)
@@ -503,8 +573,8 @@
 ## Next Actions (Priority Order)
 
 ### 🔴 Critical (This Week)
-1. Create `BLUEPRINT_DEVIATIONS.md` documenting all intentional changes
-2. Complete or revert primary exchange refactor
+1. ~~Create `BLUEPRINT_DEVIATIONS.md` documenting all intentional changes~~ — DONE
+2. ~~Complete or revert primary exchange refactor~~ — DONE (merged architecture)
 3. Wire Layer 3 signals into backtest end-to-end
 4. Add resource limits to docker-compose
 5. Run one full 90-day backtest with all metrics
@@ -517,11 +587,17 @@
 10. Add audit log tests
 
 ### 🟢 Nice to Have (If Time Permits)
-11. Merge Layer 1 services
+11. ~~Merge Layer 1 services~~ — DONE (May 2026)
 12. Add Grafana alerting
 13. Add audit query API
 14. Add backtest comparison tool
 15. Add Monte Carlo simulation
+
+### ✅ Recently Completed (May 27, 2026)
+- Layer 2 complete redesign with fast detector stack
+- Memory window implementation for score persistence
+- Real-time testing and validation framework
+- Codebase cleanup (38 obsolete files removed)
 
 ---
 

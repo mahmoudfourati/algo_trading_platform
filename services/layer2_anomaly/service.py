@@ -6,6 +6,7 @@ Consumes ValidatedTick, emits anomaly/system state, and publishes ScoredTick.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -21,6 +22,8 @@ from shared.service_health import mark_service_healthy
 from shared.schemas import ScoredTick, ValidatedTick
 
 from .engine import DecisionGate, Layer2ScoringEngine
+
+logger = logging.getLogger(__name__)
 
 
 _raw_in_total = Counter("layer2_raw_in_total", "ValidatedTick messages consumed (including bad).")
@@ -149,6 +152,85 @@ _anomaly_score_histogram = Histogram(
 _decision_gate_transitions = Counter(
     "decision_gate_state_transitions_total",
     "Decision gate state transitions",
+    ["symbol", "from_state", "to_state"]
+)
+
+# === PHASE 3: HYBRID SYSTEM METRICS ===
+
+# HST Ensemble component scores
+_hst_short_score = Gauge(
+    "anomaly_hst_short_score",
+    "HST short-term (75s) anomaly score [0,1]",
+    ["symbol"]
+)
+
+_hst_medium_score = Gauge(
+    "anomaly_hst_medium_score",
+    "HST medium-term (20min) anomaly score [0,1]",
+    ["symbol"]
+)
+
+_hst_long_score = Gauge(
+    "anomaly_hst_long_score",
+    "HST long-term (83min) anomaly score [0,1]",
+    ["symbol"]
+)
+
+# Statistical Process Control scores
+_cusum_score = Gauge(
+    "anomaly_cusum_score",
+    "CUSUM detector anomaly score [0,1]",
+    ["symbol"]
+)
+
+_ewma_score = Gauge(
+    "anomaly_ewma_score",
+    "EWMA detector anomaly score [0,1]",
+    ["symbol"]
+)
+
+_spc_combined_score = Gauge(
+    "anomaly_spc_combined_score",
+    "Combined SPC (CUSUM+EWMA) score [0,1]",
+    ["symbol"]
+)
+
+# Fusion weights (regime-adaptive)
+_fusion_if_weight = Gauge(
+    "anomaly_fusion_if_weight",
+    "Current IF weight in fusion",
+    ["symbol"]
+)
+
+_fusion_hst_weight = Gauge(
+    "anomaly_fusion_hst_weight",
+    "Current HST ensemble weight in fusion",
+    ["symbol"]
+)
+
+_fusion_spc_weight = Gauge(
+    "anomaly_fusion_spc_weight",
+    "Current SPC weight in fusion",
+    ["symbol"]
+)
+
+# Circuit breakers
+_circuit_breaker_triggers = Counter(
+    "anomaly_circuit_breaker_triggers_total",
+    "Circuit breaker trigger count",
+    ["symbol", "reason"]
+)
+
+# IF model source tracking
+_if_model_source = Gauge(
+    "anomaly_if_model_source",
+    "IF model source: 0=none, 1=pretrained, 2=online",
+    ["symbol"]
+)
+
+_decision_gate_transitions_old = Counter(
+    "decision_gate_state_transitions_total_old",
+    "Decision gate state transitions",
     ["from_state", "to_state"]
 )
 
@@ -156,6 +238,28 @@ _decision_gate_trigger_reason = Counter(
     "decision_gate_trigger_total",
     "Decision gate trigger events by reason",
     ["trigger"]
+)
+
+# === PHASE 1: NEW DETECTOR METRICS ===
+
+# Detector-specific scores
+_detector_abs_threshold = Gauge(
+    "anomaly_detector_abs_threshold",
+    "Absolute threshold detector score [0,1]",
+    ["symbol"]
+)
+
+_detector_trust_passthrough = Gauge(
+    "anomaly_detector_trust_passthrough",
+    "Trust passthrough detector score [0,1]",
+    ["symbol"]
+)
+
+# Anomaly reasons (counter)
+_anomaly_reason_counter = Counter(
+    "anomaly_reason_total",
+    "Count of anomaly reasons",
+    ["symbol", "reason"]
 )
 
 
@@ -182,7 +286,7 @@ class Layer2Service:
 
         previous_state = gate.state
         self._watchdog_in_halt[symbol] = True
-        gate.update(trust=0.0, anomaly=1.0)
+        gate.update(trust=0.0, anomaly=1.0, regime=0)  # Use regime=0 (low vol, strict) for safety
         _last_state.set(_STATE_NUM.get(gate.state, 3.0))
 
         if previous_state != "HALT":
@@ -214,10 +318,9 @@ class Layer2Service:
         scorer = self.engine_by_symbol.get(tick.symbol)
         if scorer is None:
             scorer = Layer2ScoringEngine(
+                symbol=tick.symbol,
                 hmm_model_path=os.getenv("HMM_MODEL_PATH", os.path.join("artifacts", "hmm", "model.pkl")),
-                if_weight=float(os.getenv("L2_IF_WEIGHT", "0.45")),
-                hst_weight=float(os.getenv("L2_HST_WEIGHT", "0.55")),
-                mad_floor=float(os.getenv("L2_MAD_FLOOR", "0.65")),
+                anomaly_memory_window=int(os.getenv("L2_ANOMALY_MEMORY_WINDOW", "30")),
             )
             self.engine_by_symbol[tick.symbol] = scorer
 
@@ -228,13 +331,13 @@ class Layer2Service:
                 trust_threshold=self.gate_config["trust_threshold"],
                 anomaly_threshold=self.gate_config["anomaly_threshold"],
                 upgrade_streak_required=int(self.gate_config["upgrade_streak_required"]),
+                regime_adj=self.gate_config["regime_threshold_adjustment"],
             )
             self.gate_by_symbol[tick.symbol] = gate
 
-        # === PHASE 2: TIMING MODEL INFERENCE ===
+        # Score the tick
         start_time = time.perf_counter()
         scores = scorer.score_tick(
-            symbol=tick.symbol,
             ts_ms=int(tick.timestamp_utc),
             mid_price=float(tick.mid_price),
             trust_score=float(tick.trust_score),
@@ -245,21 +348,21 @@ class Layer2Service:
         _model_inference_latency.labels(model="total_scoring").observe(total_inference_ms)
 
         prev_state = gate.state
-        system_state = gate.update(trust=float(tick.trust_score), anomaly=float(scores.anomaly_score))
+        system_state = scores.system_state  # Already computed by engine
 
         _last_state.set(_STATE_NUM.get(system_state, 0.0))
         _last_anomaly.labels(symbol=tick.symbol).set(float(scores.anomaly_score))
-        _last_if.labels(symbol=tick.symbol).set(float(scores.if_score))
-        _last_hst.labels(symbol=tick.symbol).set(float(scores.hst_score))
+        _last_if.labels(symbol=tick.symbol).set(0.0)  # Deprecated
+        _last_hst.labels(symbol=tick.symbol).set(0.0)  # Deprecated
         _last_trust.labels(symbol=tick.symbol).set(float(tick.trust_score))
         _last_input_lag_ms.labels(symbol=tick.symbol).set(
             max(0.0, float(int(time.time() * 1000) - int(tick.timestamp_utc)))
         )
         
-        # === PHASE 2: ANOMALY SCORE DECOMPOSITION METRICS ===
-        _anomaly_if_score.labels(symbol=tick.symbol).set(float(scores.if_score))
-        _anomaly_hst_score.labels(symbol=tick.symbol).set(float(scores.hst_score))
-        _anomaly_mad_triggered.labels(symbol=tick.symbol).set(1.0 if scores.mad_guard_triggered else 0.0)
+        # === NEW DETECTOR METRICS ===
+        _anomaly_if_score.labels(symbol=tick.symbol).set(0.0)  # Deprecated
+        _anomaly_hst_score.labels(symbol=tick.symbol).set(0.0)  # Deprecated
+        _anomaly_mad_triggered.labels(symbol=tick.symbol).set(0.0)  # Deprecated
         _anomaly_fused_score.labels(symbol=tick.symbol).set(float(scores.anomaly_score))
         _anomaly_score_histogram.labels(symbol=tick.symbol).observe(float(scores.anomaly_score))
         
@@ -280,24 +383,44 @@ class Layer2Service:
         
         # Decision gate state transition detection
         if prev_state != system_state:
-            _decision_gate_transitions.labels(from_state=prev_state, to_state=system_state).inc()
+            _decision_gate_transitions.labels(symbol=tick.symbol, from_state=prev_state, to_state=system_state).inc()
             # Determine trigger reason
             if float(tick.trust_score) < 0.6:
                 _decision_gate_trigger_reason.labels(trigger="trust_low").inc()
             if float(scores.anomaly_score) > 0.8:
                 _decision_gate_trigger_reason.labels(trigger="anomaly_high").inc()
-            if scores.mad_guard_triggered:
-                _decision_gate_trigger_reason.labels(trigger="mad_triggered").inc()
         
         self._last_gate_state[tick.symbol] = system_state
         
-        # === PHASE 2: FEATURE VECTOR OBSERVABILITY ===
-        _feature_raw_return.labels(symbol=tick.symbol).set(scores.feature_raw_return)
-        _feature_rolling_vol.labels(symbol=tick.symbol).set(scores.feature_rolling_vol)
-        _feature_spread_divergence.labels(symbol=tick.symbol).set(scores.feature_spread_z)
-        _feature_latency_anomaly.labels(symbol=tick.symbol).set(scores.feature_latency_z)
-        _feature_volume_anomaly.labels(symbol=tick.symbol).set(scores.feature_volume_z)
-        _feature_trust_score.labels(symbol=tick.symbol).set(scores.feature_trust_score)
+        # === FEATURE VECTOR OBSERVABILITY ===
+        _feature_raw_return.labels(symbol=tick.symbol).set(scores.feature_return)
+        _feature_rolling_vol.labels(symbol=tick.symbol).set(scores.feature_rv30m)
+        _feature_spread_divergence.labels(symbol=tick.symbol).set(scores.feature_spread_bps)
+        _feature_latency_anomaly.labels(symbol=tick.symbol).set(0.0)  # Not in new engine
+        _feature_volume_anomaly.labels(symbol=tick.symbol).set(scores.feature_volume_ratio)
+        _feature_trust_score.labels(symbol=tick.symbol).set(float(tick.trust_score))
+        
+        # === DETECTOR SCORES ===
+        _hst_short_score.labels(symbol=tick.symbol).set(0.0)  # Deprecated
+        _hst_medium_score.labels(symbol=tick.symbol).set(0.0)  # Deprecated
+        _hst_long_score.labels(symbol=tick.symbol).set(0.0)  # Deprecated
+        _cusum_score.labels(symbol=tick.symbol).set(scores.cusum_score)
+        _ewma_score.labels(symbol=tick.symbol).set(scores.ewma_score)
+        _spc_combined_score.labels(symbol=tick.symbol).set((scores.cusum_score + scores.ewma_score) / 2.0)
+        _fusion_if_weight.labels(symbol=tick.symbol).set(0.0)  # Deprecated
+        _fusion_hst_weight.labels(symbol=tick.symbol).set(0.0)  # Deprecated
+        _fusion_spc_weight.labels(symbol=tick.symbol).set(0.0)  # Deprecated
+        
+        # === NEW DETECTOR METRICS ===
+        _detector_abs_threshold.labels(symbol=tick.symbol).set(scores.absolute_score)
+        _detector_trust_passthrough.labels(symbol=tick.symbol).set(0.0)  # Not separate in new engine
+        
+        # Track anomaly reasons
+        if scores.anomaly_score > 0.5 and scores.reason:
+            _anomaly_reason_counter.labels(
+                symbol=tick.symbol,
+                reason=scores.reason
+            ).inc()
 
         out = ScoredTick(
             symbol=tick.symbol,
@@ -314,12 +437,13 @@ class Layer2Service:
             timestamp_utc=tick.timestamp_utc,
             tick_hash=tick.tick_hash,
             anomaly_score=float(scores.anomaly_score),
-            if_score=float(scores.if_score),
-            hst_score=float(scores.hst_score),
+            anomaly_reason=scores.reason,
+            if_score=0.0,  # Deprecated
+            hst_score=0.0,  # Deprecated
             regime=int(scores.regime),
             regime_posterior=list(scores.regime_posterior),
             system_state=system_state,  # type: ignore[arg-type]
-            mad_guard_triggered=bool(scores.mad_guard_triggered),
+            mad_guard_triggered=False,  # Deprecated
         )
 
         self.publisher.publish(out.model_dump())
@@ -344,7 +468,12 @@ class Layer2Service:
 
         try:
             while True:
-                records = self.consumer.poll(timeout_ms=1000, max_records=10)
+                try:
+                    records = self.consumer.poll(timeout_ms=1000, max_records=10)
+                except Exception as poll_ex:
+                    logger.error(f"Kafka poll error: {poll_ex}", exc_info=True)
+                    continue
+                
                 if not records:
                     self._check_watchdog()
                     continue
@@ -364,16 +493,21 @@ class Layer2Service:
                             )
                             continue
 
-                        self._process_validated_tick(tick)
+                        try:
+                            self._process_validated_tick(tick)
+                        except Exception as proc_ex:
+                            logger.error(f"Error processing tick: {proc_ex}", exc_info=True)
+                        
                         self._check_watchdog(now_s=time.monotonic())
+        except Exception as e:
+            logger.error(f"Fatal error in consumer loop: {e}", exc_info=True)
+            raise
         finally:
             self.publisher.stop()
             self.consumer.close()
 
 
 def build_service() -> Layer2Service:
-    start_metrics_http_server(port=int(os.getenv("METRICS_PORT", "9103")))
-
     bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVER", "localhost:29092")
     validated_topic = os.getenv("KAFKA_VALIDATED_TOPIC", "market.ticks.validated")
     group_id = os.getenv("KAFKA_GROUP_ID", f"layer2-anomaly-{int(time.time())}")
@@ -395,6 +529,7 @@ def build_service() -> Layer2Service:
         "trust_threshold": float(os.getenv("L2_TRUST_THRESHOLD", "0.60")),
         "anomaly_threshold": float(os.getenv("L2_ANOMALY_THRESHOLD", "0.55")),
         "upgrade_streak_required": int(os.getenv("L2_UPGRADE_STREAK", "10")),
+        "regime_threshold_adjustment": float(os.getenv("L2_REGIME_THRESHOLD_ADJUSTMENT", "0.10")),
     }
 
     return Layer2Service(

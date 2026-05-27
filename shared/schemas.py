@@ -282,8 +282,10 @@ class ScoredTick(BaseModel):
 
     # Layer 2 fields
     anomaly_score: float
-    if_score: float
-    hst_score: float
+    anomaly_reason: str = ""  # NEW: Primary reason for anomaly score
+    anomaly_reasons: list[str] = Field(default_factory=list)  # Multiple reasons (for future use)
+    if_score: float = 0.0  # Deprecated
+    hst_score: float = 0.0  # Deprecated
     regime: int
     regime_posterior: list[float]
     system_state: SystemState

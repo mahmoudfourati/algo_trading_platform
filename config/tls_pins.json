@@ -7,7 +7,7 @@
   "coinbase": {
     "host": "ws-feed.exchange.coinbase.com",
     "port": 443,
-    "spki_sha256": "PLACEHOLDER_DISABLE_TLS_PINNING_FOR_COINBASE_TESTING_ONLY"
+    "spki_sha256": "6c3e0f3e9798f2fdb8df17284fb3d2b4a82d3b48bb4696fa964faf580bdfb454"
   },
   "kraken": {
     "host": "ws.kraken.com",

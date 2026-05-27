@@ -17,9 +17,11 @@ services:
       # Demo: Less memory for laptop-friendly demos
       KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
 
-  layer1-ingestion:
+  layer1-merged:
     environment:
-      # Demo: Generate ticks every 100ms instead of 1000ms (10x faster)
+      # Demo: 10x faster ticks, shorter windows
+      TICK_INTERVAL_MS: "100"  # 100ms instead of 1000ms
+      CONSENSUS_WINDOW_MS: "20"  # 20ms instead of 50ms
       TICK_INTERVAL_MS: "100"
       # Demo: More verbose logging
       LOG_LEVEL: "DEBUG"

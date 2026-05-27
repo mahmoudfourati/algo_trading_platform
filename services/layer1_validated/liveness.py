@@ -12,13 +12,13 @@ from typing import Callable, Dict, List
 
 EXPECTED_INTERVALS_MS: Dict[str, float] = {
     "binance": 500,
-    "coinbase": 5_000,
-    "kraken": 7_500,
+    "coinbase": 15_000,  # Increased: Coinbase has low tick rate (~0.05 ticks/sec)
+    "kraken": 20_000,    # Increased: Kraken has low tick rate (~0.03 ticks/sec)
     "okx": 500,
     "bybit": 500,
 }
 
-SILENCE_MULTIPLIER = 3.0
+SILENCE_MULTIPLIER = 5.0  # Increased from 3.0 to be more tolerant of natural variance
 
 
 class ExchangeLivenessMonitor:

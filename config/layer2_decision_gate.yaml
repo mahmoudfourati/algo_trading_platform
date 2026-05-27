@@ -1,0 +1,45 @@
+# Layer 2 Decision Gate Configuration
+# Controls the 4-state decision gate (NORMAL, CONSERVATIVE, DEGRADED, HALT)
+
+decision_gate:
+  # Trust score threshold (Layer 1 trust score must be >= this)
+  trust_threshold: 0.60
+  
+  # Base anomaly score threshold (adjusted by regime)
+  # INCREASED from 0.55 to 0.75 to exit HALT state (HST scores too high)
+  anomaly_threshold: 0.75
+  
+  # Regime-adaptive threshold adjustment
+  # Low vol (regime 0): anomaly_threshold - regime_threshold_adjustment
+  # High vol (regime 1): anomaly_threshold + regime_threshold_adjustment
+  regime_threshold_adjustment: 0.10
+  
+  # Number of consecutive qualifying ticks required to upgrade state
+  # (Downgrades are immediate, upgrades require streak)
+  upgrade_streak_required: 10
+
+# MAD (Median Absolute Deviation) Guard Configuration
+# Regime-aware outlier detection thresholds
+mad_guard:
+  # MAD multipliers by regime (k * MAD threshold)
+  # Regime 0 (low volatility): Stricter threshold
+  # Regime 1 (high volatility): Lenient threshold
+  regime_multipliers:
+    0: 4.0  # Low vol: 4 sigma
+    1: 8.0  # High vol: 8 sigma
+  
+  # Floor value for anomaly score when MAD guard triggers
+  mad_floor: 0.65
+
+# Anomaly Detector Weights
+# Weighted fusion of Isolation Forest and Half-Space Trees
+anomaly_weights:
+  isolation_forest: 0.45
+  half_space_trees: 0.55
+
+# Notes:
+# - All thresholds are in [0, 1] range
+# - trust_threshold: Higher = stricter (require more trust)
+# - anomaly_threshold: Higher = more lenient (tolerate more anomaly)
+# - regime_threshold_adjustment: How much to adjust by volatility regime
+# - upgrade_streak_required: Prevents flapping between states

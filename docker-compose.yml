@@ -112,7 +112,8 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVER: "kafka:9092"
       METRICS_PORT: "9101"
-      EXCHANGES: "binance,bybit,coinbase,kraken,okx"
+      # EXCHANGES: "binance,bybit,coinbase,kraken,okx"  # All exchanges
+      EXCHANGES: "binance,bybit,okx"  # Coinbase & Kraken disabled (data issues)
       SYMBOLS: "BTC-USDT,ETH-USDT"
       KAFKA_VALIDATED_TOPIC: "market.ticks.validated"
       HASH_CHAIN_LOG_PATH: "/app/logs/layer1_hash_chain.jsonl"

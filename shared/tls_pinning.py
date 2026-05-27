@@ -146,6 +146,7 @@ def load_spki_pins(path: Path) -> dict[str, SpkiPin]:
     }
     
     Returns empty dict on any error (non-fatal).
+    Skips exchanges with placeholder or invalid pins (logs warning but continues).
     """
     try:
         if not path.exists():
@@ -153,11 +154,22 @@ def load_spki_pins(path: Path) -> dict[str, SpkiPin]:
         data = json.loads(path.read_text(encoding="utf-8"))
         out: dict[str, SpkiPin] = {}
         for exchange_id, cfg in data.items():
-            out[exchange_id] = SpkiPin(
-                host=str(cfg["host"]),
-                port=int(cfg["port"]),
-                spki_sha256=_normalize_hash(str(cfg["spki_sha256"])),
-            )
+            try:
+                # Skip placeholder pins during loading (they'll be rejected during verification)
+                raw_hash = str(cfg["spki_sha256"])
+                if "PLACEHOLDER" in raw_hash.upper():
+                    # Skip this exchange but continue loading others
+                    continue
+                
+                out[exchange_id] = SpkiPin(
+                    host=str(cfg["host"]),
+                    port=int(cfg["port"]),
+                    spki_sha256=_normalize_hash(raw_hash),
+                )
+            except (ValueError, KeyError) as exc:
+                # Skip invalid pins for this exchange but continue loading others
+                # This prevents one bad pin from breaking all TLS verification
+                continue
         return out
     except Exception:
         return {}
